@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pen-tracking"
+version = "1.0.0"
+description = "Markerless hand occlusion tracking for pen navigation (AInav Core)"
+requires-python = ">=3.10"
+dependencies = [
+    "mediapipe==0.10.35",
+    "numpy==2.5.0",
+    "opencv-python==5.0.0.93",
+]
+
+[project.scripts]
+pen-tracker = "pen_tracking.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

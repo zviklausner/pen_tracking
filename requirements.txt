@@ -1,0 +1,4 @@
+# Direct runtime dependencies (pinned)
+mediapipe==0.10.35
+numpy==2.5.0
+opencv-python==5.0.0.93
