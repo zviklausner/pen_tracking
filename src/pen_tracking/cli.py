@@ -15,8 +15,8 @@ from pen_tracking.video_processor import process_video
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Markerless hand occlusion tracking for pen navigation. "
-            "Detects when a hand blocks the line of sight to a tracked object."
+            "Markerless hand and pen tracking for navigation. "
+            "Detects hand landmarks and tracks the pen tip held in the hand."
         ),
     )
     parser.add_argument(
@@ -72,6 +72,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum hand tracking confidence (default: 0.5)",
     )
     parser.add_argument(
+        "--pen-max-value",
+        type=int,
+        default=100,
+        help="HSV value threshold for dark pen pixels (default: 100)",
+    )
+    parser.add_argument(
+        "--pen-axis-distance",
+        type=float,
+        default=20.0,
+        help="Max distance from pen axis during detection (default: 20)",
+    )
+    parser.add_argument(
+        "--pen-smoothing",
+        type=float,
+        default=0.65,
+        help="Temporal smoothing factor for pen tip (0-1, default: 0.65)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -96,6 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         max_num_hands=args.max_hands,
         min_detection_confidence=args.min_detection_confidence,
         min_tracking_confidence=args.min_tracking_confidence,
+        pen_max_value=args.pen_max_value,
+        pen_axis_distance=args.pen_axis_distance,
+        pen_smoothing=args.pen_smoothing,
         display=args.display,
     )
 

@@ -19,6 +19,9 @@ class TrackerConfig:
     max_num_hands: int = 1
     min_detection_confidence: float = 0.5
     min_tracking_confidence: float = 0.5
+    pen_max_value: int = 100
+    pen_axis_distance: float = 20.0
+    pen_smoothing: float = 0.65
     display: bool = False
     quit_key: str = "q"
 

@@ -21,7 +21,8 @@ def test_process_sample_video_writes_output(tmp_path: Path) -> None:
     stats = process_video(config)
 
     assert stats.frames_processed == 84
-    assert stats.frames_with_hands > 0
+    assert stats.frames_with_hands == 84
+    assert stats.frames_with_pen >= 80
     assert output_path.is_file()
     assert output_path.stat().st_size > 0
 
