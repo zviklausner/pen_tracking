@@ -12,6 +12,7 @@ from pen_tracking.frame_renderer import render_frame, resize_frame
 from pen_tracking.hand_tracker import HandTracker
 from pen_tracking.pen_tracker_cv import PenTracker
 from pen_tracking.tracking_result import FrameTrackingResult
+from pen_tracking.video_io import create_video_writer, supports_gui
 
 logger = logging.getLogger(__name__)
 
@@ -84,26 +85,26 @@ def process_video(config: TrackerConfig) -> ProcessingStats:
 
                 if writer is None and config.output_path is not None:
                     height, width = small_frame.shape[:2]
-                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    writer = cv2.VideoWriter(
-                        str(config.output_path),
-                        fourcc,
+                    writer = create_video_writer(
+                        config.output_path,
                         fps,
-                        (width, height),
+                        width,
+                        height,
                     )
-                    if not writer.isOpened():
-                        raise RuntimeError(
-                            f"Unable to create output video: {config.output_path}"
-                        )
 
                 if writer is not None:
                     writer.write(small_frame)
 
                 if config.display:
-                    cv2.imshow(window_name, small_frame)
-                    if cv2.waitKey(20) & 0xFF == ord(config.quit_key):
-                        logger.info("Stopped by user (%s key).", config.quit_key)
-                        break
+                    if not supports_gui():
+                        logger.warning(
+                            "Display requested but no GUI is available; skipping preview."
+                        )
+                    else:
+                        cv2.imshow(window_name, small_frame)
+                        if cv2.waitKey(20) & 0xFF == ord(config.quit_key):
+                            logger.info("Stopped by user (%s key).", config.quit_key)
+                            break
 
                 frame_index += 1
 
