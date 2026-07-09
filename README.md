@@ -23,6 +23,35 @@ python -m pen_tracking           # writes output/tracked_sample.mp4
 python -m pen_tracking --display # live preview (press q to quit)
 ```
 
+### Installing Python on Windows (PowerShell)
+
+Check whether Python is already installed:
+
+```powershell
+py --version
+python --version
+```
+
+If those commands fail, or `python` opens the Microsoft Store instead of printing a version, install Python with [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/):
+
+```powershell
+winget search Python.Python.3.13
+winget install Python.Python.3.13 --accept-package-agreements --accept-source-agreements
+```
+
+To list other available Python versions:
+
+```powershell
+winget search Python.Python
+```
+
+After installation, **close and reopen your terminal** (or restart Cursor), then verify:
+
+```powershell
+py --version
+py -0p
+```
+
 ### Windows (PowerShell or CMD)
 
 ```powershell
@@ -33,6 +62,18 @@ pip install -e .
 
 python -m pen_tracking
 python -m pen_tracking --display
+```
+
+If `.venv\Scripts\activate` fails with a script execution policy error in PowerShell, either allow scripts for your user account:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+Or skip activation and run the venv Python directly:
+
+```powershell
+.\.venv\Scripts\python.exe -m pen_tracking
 ```
 
 ### Cross-platform helper (any OS)
