@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import cv2
 
 from pen_tracking.config import TrackerConfig
-from pen_tracking.frame_renderer import render_frame, resize_frame
+from pen_tracking.frame_renderer import render_frame
 from pen_tracking.hand_tracker import HandTracker
 from pen_tracking.pen_tracker_cv import PenTracker
 from pen_tracking.tracking_result import FrameTrackingResult
@@ -34,6 +34,7 @@ def process_video(config: TrackerConfig) -> ProcessingStats:
         raise RuntimeError(f"Unable to open video: {config.video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    output_fps = fps / config.frame_stride
     writer = None
     window_name = "AInav Core Engine"
 
@@ -57,15 +58,18 @@ def process_video(config: TrackerConfig) -> ProcessingStats:
                 if not ret:
                     break
 
-                small_frame = resize_frame(frame, config.target_height)
-                rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+                if frame_index % config.frame_stride != 0:
+                    frame_index += 1
+                    continue
+
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 timestamp_ms = int((frame_index / fps) * 1000)
 
                 hand_detection = hand_tracker.detect(rgb_frame, timestamp_ms)
                 pen_detection = None
                 if hand_detection.hand_landmarks:
                     pen_detection = pen_tracker.detect(
-                        small_frame,
+                        frame,
                         hand_detection.hand_landmarks[0],
                     )
                 else:
@@ -75,7 +79,7 @@ def process_video(config: TrackerConfig) -> ProcessingStats:
                     hand=hand_detection,
                     pen=pen_detection,
                 )
-                render_frame(small_frame, tracking)
+                render_frame(frame, tracking)
 
                 stats.frames_processed += 1
                 if tracking.has_hand:
@@ -84,16 +88,16 @@ def process_video(config: TrackerConfig) -> ProcessingStats:
                     stats.frames_with_pen += 1
 
                 if writer is None and config.output_path is not None:
-                    height, width = small_frame.shape[:2]
+                    height, width = frame.shape[:2]
                     writer = create_video_writer(
                         config.output_path,
-                        fps,
+                        output_fps,
                         width,
                         height,
                     )
 
                 if writer is not None:
-                    writer.write(small_frame)
+                    writer.write(frame)
 
                 if config.display:
                     if not supports_gui():
@@ -101,7 +105,7 @@ def process_video(config: TrackerConfig) -> ProcessingStats:
                             "Display requested but no GUI is available; skipping preview."
                         )
                     else:
-                        cv2.imshow(window_name, small_frame)
+                        cv2.imshow(window_name, frame)
                         if cv2.waitKey(20) & 0xFF == ord(config.quit_key):
                             logger.info("Stopped by user (%s key).", config.quit_key)
                             break

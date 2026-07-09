@@ -1,4 +1,4 @@
-"""Pen detection using hand-guided color segmentation."""
+"""Pen detection using hand geometry with optional vision refinement."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+REF_HEIGHT = 720
 
 
 @dataclass(frozen=True)
@@ -19,20 +21,24 @@ class PenDetectionResult:
 
 
 class PenTracker:
-    """Detects a dark pen held in a tracked hand."""
+    """Estimates pen tip from hand pose; vision only refines when the pen is visible."""
 
     def __init__(
         self,
         *,
-        max_value: int = 100,
+        max_value: int = 160,
         axis_distance: float = 20.0,
         min_candidates: int = 5,
         smoothing: float = 0.65,
+        detection_height: int = REF_HEIGHT,
+        extension_factor: float = 1.35,
     ) -> None:
         self.max_value = max_value
         self.axis_distance = axis_distance
         self.min_candidates = min_candidates
         self.smoothing = smoothing
+        self.detection_height = detection_height
+        self.extension_factor = extension_factor
         self._last: PenDetectionResult | None = None
 
     def detect(self, frame_bgr, hand_landmarks) -> PenDetectionResult | None:
@@ -65,126 +71,144 @@ class PenTracker:
     def reset(self) -> None:
         self._last = None
 
+    def _hand_geometry(
+        self,
+        points: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
+        """Derive grip, pen axis, index tip, and finger span from landmarks."""
+        index_mcp = points[5]
+        index_tip = points[8]
+        thumb_tip = points[4]
+
+        finger_vec = index_tip - index_mcp
+        finger_span = float(np.linalg.norm(finger_vec))
+        if finger_span < 1e-3:
+            return None
+
+        axis = finger_vec / finger_span
+        grip = (thumb_tip + index_tip) / 2.0
+        return grip, axis, index_tip, finger_span
+
+    def _geometry_tip(
+        self,
+        index_tip: np.ndarray,
+        axis: np.ndarray,
+        finger_span: float,
+    ) -> np.ndarray:
+        """Extrapolate pen tip beyond the index fingertip along the pen axis."""
+        extension = finger_span * self.extension_factor
+        return index_tip + axis * extension
+
+    def _refine_tip_with_vision(
+        self,
+        gray: np.ndarray,
+        index_tip: np.ndarray,
+        axis: np.ndarray,
+        finger_span: float,
+        geometry_tip: np.ndarray,
+        scale: float,
+    ) -> np.ndarray:
+        """
+        Optionally nudge the tip along the pen axis using darkness in a narrow band.
+        Falls back to geometry when the blurry pen shaft is not visible.
+        """
+        perp = np.array([-axis[1], axis[0]])
+        half_width = max(4.0, 10.0 * scale)
+        step = max(2.0, 4.0 * scale)
+        min_extension = finger_span * 0.5
+        max_extension = finger_span * 2.2
+        h, w = gray.shape[:2]
+
+        best_along = float(np.dot(geometry_tip - index_tip, axis))
+        best_score = -1.0
+
+        along = min_extension
+        while along <= max_extension:
+            center = index_tip + axis * along
+            darkness = 0.0
+            samples = 0
+            for offset in np.linspace(-half_width, half_width, 5):
+                point = center + perp * offset
+                x, y = int(round(point[0])), int(round(point[1]))
+                if 0 <= y < h and 0 <= x < w:
+                    darkness += 255.0 - float(gray[y, x])
+                    samples += 1
+            if samples > 0:
+                score = darkness / samples
+                if score > best_score:
+                    best_score = score
+                    best_along = along
+            along += step
+
+        geo_along = float(np.dot(geometry_tip - index_tip, axis))
+        # Only trust vision if it finds a clearly darker corridor near the geometry estimate.
+        if best_score < 80.0 or abs(best_along - geo_along) > finger_span * 0.6:
+            return geometry_tip
+        return index_tip + axis * best_along
+
     def _detect_raw(self, frame_bgr, hand_landmarks) -> PenDetectionResult | None:
         height, width = frame_bgr.shape[:2]
         points = np.array(
             [[landmark.x * width, landmark.y * height] for landmark in hand_landmarks]
         )
 
-        index_mcp = points[5]
-        index_tip = points[8]
-        thumb_tip = points[4]
-        axis = index_tip - index_mcp
-        axis_norm = np.linalg.norm(axis)
-        if axis_norm < 1e-3:
+        geometry = self._hand_geometry(points)
+        if geometry is None:
             return None
 
-        axis = axis / axis_norm
-        perpendicular = np.array([-axis[1], axis[0]])
-        grip = (thumb_tip + index_tip) / 2
+        grip, axis, index_tip, finger_span = geometry
+        geometry_tip = self._geometry_tip(index_tip, axis, finger_span)
 
-        padding = 60
+        scale = height / REF_HEIGHT
+        padding = int(40 * scale)
         x1 = int(max(0, points[:, 0].min() - padding))
         y1 = int(max(0, points[:, 1].min() - padding))
         x2 = int(min(width, points[:, 0].max() + padding))
-        y2 = int(min(height, points[:, 1].max() + padding + 180))
+        y2 = int(min(height, points[:, 1].max() + padding + int(220 * scale)))
         roi = frame_bgr[y1:y2, x1:x2]
-
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, (0, 0, 0), (180, 255, self.max_value))
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-        ys, xs = np.where(mask > 0)
-        if len(xs) == 0:
-            return None
-
-        candidates: list[tuple[float, float, float, float]] = []
-        for x, y in zip(xs, ys):
-            px = float(x + x1)
-            py = float(y + y1)
-            relative = np.array([px, py]) - grip
-            along = float(np.dot(relative, axis))
-            across = abs(float(np.dot(relative, perpendicular)))
-            if along < -10 or along > 260 or across > self.axis_distance:
-                continue
-            if py < index_tip[1] - 15:
-                continue
-            candidates.append((px, py, along, across))
-
-        if len(candidates) < self.min_candidates:
-            fallback = self._detect_from_contour(mask, x1, y1, grip, index_tip)
-            if fallback is None:
-                return None
-            tip, grip_point, confidence = fallback
-            return PenDetectionResult(
-                tip=tip,
-                grip=grip_point,
-                axis=(float(axis[0]), float(axis[1])),
-                confidence=confidence,
-            )
-
-        arr = np.array(candidates)
-        tip = tuple(arr[np.argmax(arr[:, 1]), :2])
-        near_grip = arr[arr[:, 2] < 40]
-        if len(near_grip):
-            grip_point = tuple(
-                near_grip[
-                    np.argmin(np.linalg.norm(near_grip[:, :2] - grip, axis=1))
-                ][:2]
-            )
+        if roi.size == 0:
+            tip = geometry_tip
+            confidence = 0.6
         else:
-            grip_point = (float(grip[0]), float(grip[1]))
+            roi_h = roi.shape[0]
+            det_scale = min(1.0, self.detection_height / roi_h)
+            if det_scale < 1.0:
+                det_roi = cv2.resize(
+                    roi,
+                    (int(roi.shape[1] * det_scale), int(roi_h * det_scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
+            else:
+                det_roi = roi
+                det_scale = 1.0
 
-        confidence = min(1.0, len(candidates) / 40.0)
+            local_index_tip = (index_tip - np.array([x1, y1])) * det_scale
+            local_axis = axis  # unit vector, unchanged by uniform scale
+            local_span = finger_span * det_scale
+            local_geo_tip = self._geometry_tip(local_index_tip, local_axis, local_span)
+
+            gray = cv2.cvtColor(det_roi, cv2.COLOR_BGR2GRAY)
+            local_tip = self._refine_tip_with_vision(
+                gray,
+                local_index_tip,
+                local_axis,
+                local_span,
+                local_geo_tip,
+                det_scale,
+            )
+            tip = local_tip / det_scale + np.array([x1, y1])
+            confidence = 0.85
+
+        # Tip must extend beyond the index fingertip along the pen axis.
+        tip_along = float(np.dot(tip - index_tip, axis))
+        min_along = finger_span * 0.4
+        if tip_along < min_along:
+            tip = geometry_tip
+            confidence = 0.7
+
         return PenDetectionResult(
-            tip=tip,
-            grip=grip_point,
+            tip=(float(tip[0]), float(tip[1])),
+            grip=(float(grip[0]), float(grip[1])),
             axis=(float(axis[0]), float(axis[1])),
             confidence=confidence,
         )
-
-    @staticmethod
-    def _detect_from_contour(
-        mask,
-        x_offset: int,
-        y_offset: int,
-        grip: np.ndarray,
-        index_tip: np.ndarray,
-    ) -> tuple[tuple[float, float], tuple[float, float], float] | None:
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        best_score = -1.0
-        best: tuple[tuple[float, float], tuple[float, float], float] | None = None
-
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < 80 or area > 8000:
-                continue
-
-            rect = cv2.minAreaRect(contour)
-            _, (rect_w, rect_h), _ = rect
-            major = max(rect_w, rect_h)
-            minor = min(rect_w, rect_h)
-            if minor < 1 or major / minor < 2.0:
-                continue
-
-            contour_points = contour.reshape(-1, 2).astype(float)
-            contour_points[:, 0] += x_offset
-            contour_points[:, 1] += y_offset
-
-            if np.linalg.norm(contour_points - grip, axis=1).min() > 120:
-                continue
-            if contour_points[:, 1].max() < index_tip[1] - 10:
-                continue
-
-            tip = tuple(contour_points[np.argmax(contour_points[:, 1])])
-            grip_point = tuple(
-                contour_points[np.argmin(np.linalg.norm(contour_points - grip, axis=1))]
-            )
-            score = area * (major / minor)
-            if score > best_score:
-                best_score = score
-                best = (tip, grip_point, min(1.0, score / 500.0))
-
-        return best

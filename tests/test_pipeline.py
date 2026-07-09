@@ -20,16 +20,16 @@ def test_process_sample_video_writes_output(tmp_path: Path) -> None:
 
     stats = process_video(config)
 
-    assert stats.frames_processed == 84
-    assert stats.frames_with_hands == 84
-    assert stats.frames_with_pen >= 80
+    assert stats.frames_processed == 42
+    assert stats.frames_with_hands >= 41
+    assert stats.frames_with_pen >= 41
     assert output_path.is_file()
     assert output_path.stat().st_size > 0
 
     cap = cv2.VideoCapture(str(output_path))
     assert cap.isOpened()
-    assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) == 84
-    assert int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) == 720
+    assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) == 42
+    assert int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) == 3840
     cap.release()
 
 

@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR / "tracked_sample.mp4",
+        default=DEFAULT_OUTPUT_DIR / "tracked_palm1.mp4",
         help="Output annotated video path (use --no-output to skip writing)",
     )
     parser.add_argument(
@@ -48,10 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show a live preview window (press q to quit)",
     )
     parser.add_argument(
-        "--target-height",
+        "--frame-stride",
         type=int,
-        default=720,
-        help="Downsample frames to this height for faster processing (default: 720)",
+        default=2,
+        help="Process every Nth frame; 2 = ~15 fps, 1 = ~30 fps, 10 = ~3 fps (default: 2)",
     )
     parser.add_argument(
         "--max-hands",
@@ -74,8 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pen-max-value",
         type=int,
-        default=100,
-        help="HSV value threshold for dark pen pixels (default: 100)",
+        default=160,
+        help="HSV value threshold for dark pen pixels; raise for out-of-focus blur (default: 160)",
     )
     parser.add_argument(
         "--pen-axis-distance",
@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         video_path=args.video,
         model_path=args.model,
         output_path=None if args.no_output else args.output,
-        target_height=args.target_height,
+        frame_stride=args.frame_stride,
         max_num_hands=args.max_hands,
         min_detection_confidence=args.min_detection_confidence,
         min_tracking_confidence=args.min_tracking_confidence,

@@ -14,12 +14,12 @@ class TrackerConfig:
 
     video_path: Path = DEFAULT_VIDEO
     model_path: Path = DEFAULT_MODEL
-    output_path: Path | None = DEFAULT_OUTPUT_DIR / "tracked_sample.mp4"
-    target_height: int = 720
+    output_path: Path | None = DEFAULT_OUTPUT_DIR / "tracked_palm1.mp4"
+    frame_stride: int = 2
     max_num_hands: int = 1
     min_detection_confidence: float = 0.5
     min_tracking_confidence: float = 0.5
-    pen_max_value: int = 100
+    pen_max_value: int = 160
     pen_axis_distance: float = 20.0
     pen_smoothing: float = 0.65
     display: bool = False
@@ -33,7 +33,7 @@ class TrackerConfig:
                 f"Hand landmarker model not found: {self.model_path}. "
                 "Download it to models/hand_landmarker.task."
             )
-        if self.target_height <= 0:
-            raise ValueError("target_height must be positive")
+        if self.frame_stride <= 0:
+            raise ValueError("frame_stride must be positive")
         if self.output_path is not None:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
