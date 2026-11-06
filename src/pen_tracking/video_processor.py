@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import cv2
@@ -24,8 +26,20 @@ class ProcessingStats:
     frames_with_pen: int = 0
 
 
-def process_video(config: TrackerConfig) -> ProcessingStats:
-    """Run hand and pen tracking over a video file."""
+ProgressCallback = Callable[[int, int], None]
+
+
+def process_video(
+    config: TrackerConfig,
+    *,
+    progress: ProgressCallback | None = None,
+    stop_event: threading.Event | None = None,
+) -> ProcessingStats:
+    """Run hand and pen tracking over a video file.
+
+    ``progress`` is called with ``(frames_read, total_frames)``; ``total_frames``
+    may be 0 when the container does not report a frame count.
+    """
     config.validate()
     stats = ProcessingStats()
 
@@ -34,6 +48,7 @@ def process_video(config: TrackerConfig) -> ProcessingStats:
         raise RuntimeError(f"Unable to open video: {config.video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 0)
     output_fps = fps / config.frame_stride
     writer = None
     window_name = "AInav Core Engine"
@@ -54,9 +69,16 @@ def process_video(config: TrackerConfig) -> ProcessingStats:
             frame_index = 0
 
             while cap.isOpened():
+                if stop_event is not None and stop_event.is_set():
+                    logger.info("Stopped by request after %s frames.", frame_index)
+                    break
+
                 ret, frame = cap.read()
                 if not ret:
                     break
+
+                if progress is not None:
+                    progress(frame_index + 1, total_frames)
 
                 if frame_index % config.frame_stride != 0:
                     frame_index += 1

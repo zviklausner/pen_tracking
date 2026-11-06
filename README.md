@@ -76,6 +76,17 @@ Or skip activation and run the venv Python directly:
 .\.venv\Scripts\python.exe -m pen_tracking
 ```
 
+### Desktop UI
+
+A small Tkinter window lets you pick the input video, choose which frames to process (every frame up to every 10th frame), and choose where the annotated output `.mp4` is saved:
+
+```bash
+pen-tracker-gui                  # after pip install -e .
+python -m pen_tracking.gui       # equivalent
+```
+
+On Windows you can also double-click `scripts\run_gui.bat`. Processing runs in the background with a progress bar and can be cancelled; a cancelled run keeps the partial output.
+
 ### Cross-platform helper (any OS)
 
 ```bash

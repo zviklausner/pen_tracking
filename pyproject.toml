@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 pen-tracker = "pen_tracking.cli:main"
+pen-tracker-gui = "pen_tracking.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
