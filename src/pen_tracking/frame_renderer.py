@@ -5,20 +5,22 @@ from __future__ import annotations
 import cv2
 from mediapipe.tasks.python.vision import HandLandmarksConnections
 
+from pen_tracking.config import DEFAULT_OVERLAY_COLOR, DEFAULT_OVERLAY_THICKNESS, OVERLAY_COLORS_BGR
 from pen_tracking.tracking_result import FrameTrackingResult
 
-TITLE = "AInav Core - Hand + Pen Tracking"
+TITLE_BOTH = "AInav Core - Hand + Pen Tracking"
+TITLE_HAND = "AInav Core - Hand Tracking"
+TITLE_PEN = "AInav Core - Pen Tracking"
 STATE_HAND_PEN = "STATE: Hand + Pen tracked"
 STATE_HAND_ONLY = "STATE: Hand tracked (pen not found)"
+STATE_HAND = "STATE: Hand tracked"
 STATE_PEN_ONLY = "STATE: Pen tracked (no hand)"
+STATE_PEN = "STATE: Pen tracked"
 STATE_CLEAR = "STATE: Clear Line of Sight"
 
 _COLOR_TITLE = (0, 255, 0)
 _COLOR_HAND = (0, 255, 0)
 _COLOR_CONNECTION = (255, 255, 255)
-_COLOR_PEN_BODY = (255, 128, 0)
-_COLOR_PEN_TIP = (0, 0, 255)
-_COLOR_PEN_GRIP = (255, 0, 255)
 _COLOR_STATUS_HAND = (0, 0, 255)
 _COLOR_STATUS_BOTH = (0, 255, 255)
 _COLOR_STATUS_CLEAR = (0, 255, 255)
@@ -38,28 +40,68 @@ def _draw_landmarks(frame, hand_landmarks, width: int, height: int) -> None:
         cv2.line(frame, start_point, end_point, _COLOR_CONNECTION, 2)
 
 
-def _draw_pen(frame, pen) -> None:
+def _draw_pen(
+    frame,
+    pen,
+    *,
+    color: tuple[int, int, int],
+    thickness: int,
+) -> None:
     grip = (int(pen.grip[0]), int(pen.grip[1]))
     tip = (int(pen.tip[0]), int(pen.tip[1]))
-    cv2.line(frame, grip, tip, _COLOR_PEN_BODY, 2)
-    cv2.circle(frame, grip, 5, _COLOR_PEN_GRIP, -1)
-    cv2.circle(frame, tip, 7, _COLOR_PEN_TIP, -1)
+    # Dark outline so a bright line stays visible on both wood and black shaft.
+    outline = max(thickness + 2, thickness * 2)
+    cv2.line(frame, grip, tip, (0, 0, 0), outline)
+    cv2.line(frame, grip, tip, color, thickness)
+    radius = max(6, thickness + 2)
+    cv2.circle(frame, grip, radius, (0, 0, 0), -1)
+    cv2.circle(frame, grip, max(4, thickness), color, -1)
+    cv2.circle(frame, tip, radius + 2, (0, 0, 0), -1)
+    cv2.circle(frame, tip, radius, color, -1)
     cv2.putText(
         frame,
         "PEN TIP",
-        (tip[0] + 8, tip[1] - 8),
+        (tip[0] + 10, tip[1] - 10),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.4,
-        _COLOR_PEN_TIP,
-        1,
+        0.5,
+        (0, 0, 0),
+        3,
+    )
+    cv2.putText(
+        frame,
+        "PEN TIP",
+        (tip[0] + 10, tip[1] - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        color,
+        2,
     )
 
 
-def render_frame(frame, tracking: FrameTrackingResult) -> None:
-    """Annotate a BGR frame in place with hand and pen tracking overlays."""
+def render_frame(
+    frame,
+    tracking: FrameTrackingResult,
+    *,
+    draw_hand: bool = True,
+    draw_pen: bool = True,
+    overlay_color: tuple[int, int, int] | str = DEFAULT_OVERLAY_COLOR,
+    overlay_thickness: int = DEFAULT_OVERLAY_THICKNESS,
+) -> None:
+    """Annotate a BGR frame in place with hand and/or pen tracking overlays."""
+    if isinstance(overlay_color, str):
+        color = OVERLAY_COLORS_BGR[overlay_color]
+    else:
+        color = overlay_color
+
+    if draw_hand and draw_pen:
+        title = TITLE_BOTH
+    elif draw_hand:
+        title = TITLE_HAND
+    else:
+        title = TITLE_PEN
     cv2.putText(
         frame,
-        TITLE,
+        title,
         (15, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
@@ -67,50 +109,43 @@ def render_frame(frame, tracking: FrameTrackingResult) -> None:
         2,
     )
 
-    if tracking.has_hand:
-        if tracking.has_pen:
-            status = STATE_HAND_PEN
-            color = _COLOR_STATUS_BOTH
-        else:
-            status = STATE_HAND_ONLY
-            color = _COLOR_STATUS_HAND
+    show_hand = draw_hand and tracking.has_hand
+    show_pen = draw_pen and tracking.has_pen
 
-        cv2.putText(
-            frame,
-            status,
-            (15, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-            2,
-        )
+    if show_hand and show_pen:
+        status, status_color = STATE_HAND_PEN, _COLOR_STATUS_BOTH
+    elif show_hand and draw_pen:
+        status, status_color = STATE_HAND_ONLY, _COLOR_STATUS_HAND
+    elif show_hand:
+        status, status_color = STATE_HAND, _COLOR_STATUS_HAND
+    elif show_pen and draw_hand:
+        status, status_color = STATE_PEN_ONLY, _COLOR_STATUS_BOTH
+    elif show_pen:
+        status, status_color = STATE_PEN, _COLOR_STATUS_BOTH
+    else:
+        status, status_color = STATE_CLEAR, _COLOR_STATUS_CLEAR
 
+    cv2.putText(
+        frame,
+        status,
+        (15, 60),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        status_color,
+        2,
+    )
+
+    if show_hand:
         height, width = frame.shape[:2]
         for hand in tracking.hand.hand_landmarks:
             _draw_landmarks(frame, hand, width, height)
 
-        if tracking.pen is not None:
-            _draw_pen(frame, tracking.pen)
-    elif tracking.has_pen:
-        cv2.putText(
+    if show_pen and tracking.pen is not None:
+        _draw_pen(
             frame,
-            STATE_PEN_ONLY,
-            (15, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            _COLOR_STATUS_BOTH,
-            2,
-        )
-        _draw_pen(frame, tracking.pen)
-    else:
-        cv2.putText(
-            frame,
-            STATE_CLEAR,
-            (15, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            _COLOR_STATUS_CLEAR,
-            2,
+            tracking.pen,
+            color=color,
+            thickness=overlay_thickness,
         )
 
 

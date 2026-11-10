@@ -5,18 +5,21 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import cv2
 
 from pen_tracking.config import TrackerConfig
 from pen_tracking.frame_renderer import render_frame
-from pen_tracking.hand_tracker import HandTracker
+from pen_tracking.hand_tracker import HandDetectionResult, HandTracker
 from pen_tracking.pen_tracker_cv import PenTracker
 from pen_tracking.tracking_result import FrameTrackingResult
 from pen_tracking.video_io import create_video_writer, supports_gui
 
 logger = logging.getLogger(__name__)
+
+_EMPTY_HAND = HandDetectionResult(hand_landmarks=[], handedness=[])
 
 
 @dataclass
@@ -35,7 +38,7 @@ def process_video(
     progress: ProgressCallback | None = None,
     stop_event: threading.Event | None = None,
 ) -> ProcessingStats:
-    """Run hand and pen tracking over a video file.
+    """Run hand and/or pen tracking over a video file.
 
     ``progress`` is called with ``(frames_read, total_frames)``; ``total_frames``
     may be 0 when the container does not report a frame count.
@@ -52,18 +55,27 @@ def process_video(
     output_fps = fps / config.frame_stride
     writer = None
     window_name = "AInav Core Engine"
-
-    try:
-        with HandTracker(
+    hand_context = (
+        HandTracker(
             str(config.model_path),
             max_num_hands=config.max_num_hands,
             min_detection_confidence=config.min_detection_confidence,
             min_tracking_confidence=config.min_tracking_confidence,
-        ) as hand_tracker:
-            pen_tracker = PenTracker(
-                max_value=config.pen_max_value,
-                axis_distance=config.pen_axis_distance,
-                smoothing=config.pen_smoothing,
+        )
+        if config.track_hand
+        else nullcontext()
+    )
+
+    try:
+        with hand_context as hand_tracker:
+            pen_tracker = (
+                PenTracker(
+                    max_value=config.pen_max_value,
+                    axis_distance=config.pen_axis_distance,
+                    smoothing=config.pen_smoothing,
+                )
+                if config.track_pen
+                else None
             )
 
             frame_index = 0
@@ -84,26 +96,36 @@ def process_video(
                     frame_index += 1
                     continue
 
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 timestamp_ms = int((frame_index / fps) * 1000)
+                hand_detection = _EMPTY_HAND
+                if hand_tracker is not None:
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    hand_detection = hand_tracker.detect(rgb_frame, timestamp_ms)
 
-                hand_detection = hand_tracker.detect(rgb_frame, timestamp_ms)
                 pen_detection = None
-                if hand_detection.hand_landmarks:
-                    pen_detection = pen_tracker.track(
-                        frame,
-                        hand_detection.hand_landmarks[0],
-                    )
-                elif config.track_pen_without_hand:
-                    pen_detection = pen_tracker.track(frame)
-                else:
-                    pen_tracker.reset()
+                if pen_tracker is not None:
+                    if hand_detection.hand_landmarks:
+                        pen_detection = pen_tracker.track(
+                            frame,
+                            hand_detection.hand_landmarks[0],
+                        )
+                    elif config.track_pen_without_hand or not config.track_hand:
+                        pen_detection = pen_tracker.track(frame)
+                    else:
+                        pen_tracker.reset()
 
                 tracking = FrameTrackingResult(
                     hand=hand_detection,
                     pen=pen_detection,
                 )
-                render_frame(frame, tracking)
+                render_frame(
+                    frame,
+                    tracking,
+                    draw_hand=config.track_hand,
+                    draw_pen=config.track_pen,
+                    overlay_color=config.overlay_bgr,
+                    overlay_thickness=config.overlay_thickness,
+                )
 
                 stats.frames_processed += 1
                 if tracking.has_hand:

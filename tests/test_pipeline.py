@@ -101,6 +101,44 @@ def test_pen_is_followed_before_the_hand_appears(monkeypatch) -> None:
     assert stats.frames_with_pen == stats.frames_processed
 
 
+def test_hand_only_mode_skips_pen(tmp_path: Path) -> None:
+    output_path = tmp_path / "hand_only.mp4"
+    config = TrackerConfig(
+        video_path=DEFAULT_VIDEO,
+        model_path=DEFAULT_MODEL,
+        output_path=output_path,
+        track_mode="hand",
+        frame_stride=10,
+        display=False,
+    )
+
+    stats = process_video(config)
+
+    assert stats.frames_processed > 0
+    assert stats.frames_with_pen == 0
+    assert stats.frames_with_hands >= 1
+    assert output_path.is_file()
+
+
+def test_pen_only_mode_skips_hand(tmp_path: Path) -> None:
+    output_path = tmp_path / "pen_only.mp4"
+    config = TrackerConfig(
+        video_path=DEFAULT_VIDEO,
+        model_path=DEFAULT_MODEL,
+        output_path=output_path,
+        track_mode="pen",
+        frame_stride=10,
+        display=False,
+    )
+
+    stats = process_video(config)
+
+    assert stats.frames_processed > 0
+    assert stats.frames_with_hands == 0
+    assert stats.frames_with_pen == stats.frames_processed
+    assert output_path.is_file()
+
+
 def test_pen_without_hand_can_be_disabled(monkeypatch) -> None:
     _hide_hand_before(monkeypatch, cutoff_ms=1000)
     config = TrackerConfig(

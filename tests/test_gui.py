@@ -58,6 +58,7 @@ def test_build_config(tmp_path: Path) -> None:
     assert config.model_path == DEFAULT_MODEL
     assert config.display is False
     assert config.track_pen_without_hand is True
+    assert config.track_mode == "both"
 
 
 def test_build_config_can_disable_pen_without_hand(tmp_path: Path) -> None:
@@ -65,6 +66,28 @@ def test_build_config_can_disable_pen_without_hand(tmp_path: Path) -> None:
         tmp_path / "in.mov", 2, tmp_path / "out.mp4", track_pen_without_hand=False
     )
     assert config.track_pen_without_hand is False
+
+
+@pytest.mark.parametrize("mode", ["both", "hand", "pen"])
+def test_build_config_accepts_track_modes(tmp_path: Path, mode: str) -> None:
+    config = build_config(tmp_path / "in.mov", 2, tmp_path / "out.mp4", track_mode=mode)
+    assert config.track_mode == mode
+    assert config.track_hand is (mode in ("both", "hand"))
+    assert config.track_pen is (mode in ("both", "pen"))
+
+
+def test_build_config_line_color_and_auto_open(tmp_path: Path) -> None:
+    config = build_config(
+        tmp_path / "in.mov",
+        2,
+        tmp_path / "out.mp4",
+        overlay_color="cyan",
+        open_output_when_done=True,
+    )
+    assert config.overlay_color == "cyan"
+    assert config.overlay_bgr == (255, 255, 0)
+    assert config.open_output_when_done is True
+    assert config.overlay_thickness >= 4
 
 
 def test_build_config_forces_mp4_suffix(tmp_path: Path) -> None:

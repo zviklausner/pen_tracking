@@ -80,7 +80,7 @@ Or skip activation and run the venv Python directly:
 
 ### Desktop UI
 
-A small Tkinter window lets you pick the input video, choose which frames to process (every frame up to every 10th frame), and choose where the annotated output `.mp4` is saved:
+A small Tkinter window lets you pick a **Start folder** (drives / Desktop / Documents / `C:\\AI\\Sampels`, or **Choose folder...**), then use the normal Windows **Browse...** dialogs to pick the input video and output `.mp4`. You can also choose which frames to process, what to track (**hand**, **pen**, or **both**), the **tracking line color** (bright colors that contrast with a dark pencil), and whether to **open the output video automatically** when processing finishes:
 
 ```bash
 pen-tracker-gui                  # after pip install -e .

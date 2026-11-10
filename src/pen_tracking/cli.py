@@ -90,6 +90,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Temporal smoothing factor for pen tip (0-1, default: 0.65)",
     )
     parser.add_argument(
+        "--mode",
+        choices=("both", "hand", "pen"),
+        default="both",
+        help="What to track: both (default), hand only, or pen only",
+    )
+    parser.add_argument(
+        "--line-color",
+        choices=("yellow", "lime", "cyan", "magenta", "orange", "white", "red"),
+        default="yellow",
+        help="Color of the pen tracking line (default: yellow)",
+    )
+    parser.add_argument(
+        "--open-output",
+        action="store_true",
+        help="Open the output video after processing finishes",
+    )
+    parser.add_argument(
         "--no-pen-without-hand",
         action="store_true",
         help="Only track the pen while a hand is detected (default: also find it by its look)",
@@ -122,7 +139,10 @@ def main(argv: list[str] | None = None) -> int:
         pen_max_value=args.pen_max_value,
         pen_axis_distance=args.pen_axis_distance,
         pen_smoothing=args.pen_smoothing,
+        track_mode=args.mode,
         track_pen_without_hand=not args.no_pen_without_hand,
+        overlay_color=args.line_color,
+        open_output_when_done=args.open_output,
         display=args.display,
     )
 
@@ -135,6 +155,18 @@ def main(argv: list[str] | None = None) -> int:
     if stats.frames_processed == 0:
         logging.error("No frames were processed.")
         return 1
+
+    if args.open_output and config.output_path is not None and config.output_path.is_file():
+        import os
+        import subprocess
+
+        path = config.output_path
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(path)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(path)], check=False)
 
     return 0
 
