@@ -10,6 +10,7 @@ from pen_tracking.tracking_result import FrameTrackingResult
 TITLE = "AInav Core - Hand + Pen Tracking"
 STATE_HAND_PEN = "STATE: Hand + Pen tracked"
 STATE_HAND_ONLY = "STATE: Hand tracked (pen not found)"
+STATE_PEN_ONLY = "STATE: Pen tracked (no hand)"
 STATE_CLEAR = "STATE: Clear Line of Sight"
 
 _COLOR_TITLE = (0, 255, 0)
@@ -90,6 +91,17 @@ def render_frame(frame, tracking: FrameTrackingResult) -> None:
 
         if tracking.pen is not None:
             _draw_pen(frame, tracking.pen)
+    elif tracking.has_pen:
+        cv2.putText(
+            frame,
+            STATE_PEN_ONLY,
+            (15, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            _COLOR_STATUS_BOTH,
+            2,
+        )
+        _draw_pen(frame, tracking.pen)
     else:
         cv2.putText(
             frame,

@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 
 from pen_tracking.config import TrackerConfig
+from pen_tracking.hand_tracker import HandDetectionResult, HandTracker
 from pen_tracking.paths import DEFAULT_MODEL, DEFAULT_VIDEO, PROJECT_ROOT
 from pen_tracking.video_processor import process_video
 
@@ -70,6 +71,49 @@ def test_process_video_stops_when_requested(tmp_path: Path) -> None:
 
     assert stats.frames_processed == 5
     assert (tmp_path / "partial.mp4").is_file()
+
+
+def _hide_hand_before(monkeypatch, cutoff_ms: int) -> None:
+    """Simulate a video whose opening shows the pen without a detectable hand."""
+    original_detect = HandTracker.detect
+
+    def detect(self, rgb_frame, timestamp_ms):
+        result = original_detect(self, rgb_frame, timestamp_ms)
+        if timestamp_ms < cutoff_ms:
+            return HandDetectionResult(hand_landmarks=[], handedness=[])
+        return result
+
+    monkeypatch.setattr(HandTracker, "detect", detect)
+
+
+def test_pen_is_followed_before_the_hand_appears(monkeypatch) -> None:
+    _hide_hand_before(monkeypatch, cutoff_ms=1000)
+    config = TrackerConfig(
+        video_path=DEFAULT_VIDEO,
+        model_path=DEFAULT_MODEL,
+        output_path=None,
+        display=False,
+    )
+
+    stats = process_video(config)
+
+    assert stats.frames_with_hands <= stats.frames_processed - 15
+    assert stats.frames_with_pen == stats.frames_processed
+
+
+def test_pen_without_hand_can_be_disabled(monkeypatch) -> None:
+    _hide_hand_before(monkeypatch, cutoff_ms=1000)
+    config = TrackerConfig(
+        video_path=DEFAULT_VIDEO,
+        model_path=DEFAULT_MODEL,
+        output_path=None,
+        track_pen_without_hand=False,
+        display=False,
+    )
+
+    stats = process_video(config)
+
+    assert stats.frames_with_pen <= stats.frames_with_hands
 
 
 def test_project_assets_exist() -> None:

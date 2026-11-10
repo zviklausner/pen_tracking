@@ -90,10 +90,12 @@ def process_video(
                 hand_detection = hand_tracker.detect(rgb_frame, timestamp_ms)
                 pen_detection = None
                 if hand_detection.hand_landmarks:
-                    pen_detection = pen_tracker.detect(
+                    pen_detection = pen_tracker.track(
                         frame,
                         hand_detection.hand_landmarks[0],
                     )
+                elif config.track_pen_without_hand:
+                    pen_detection = pen_tracker.track(frame)
                 else:
                     pen_tracker.reset()
 

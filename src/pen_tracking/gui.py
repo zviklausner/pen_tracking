@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 
 from pen_tracking.config import TrackerConfig
-from pen_tracking.paths import DEFAULT_MODEL, DEFAULT_OUTPUT_DIR
+from pen_tracking.paths import DEFAULT_MODEL, DEFAULT_OUTPUT_DIR, ICON_ICO, ICON_PNG
 from pen_tracking.video_processor import ProcessingStats, process_video
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ VIDEO_FILETYPES = [
     ("All files", "*.*"),
 ]
 POLL_INTERVAL_MS = 100
+APP_USER_MODEL_ID = "AInav.PenTracking.GUI"
 
 
 def _ordinal(n: int) -> str:
@@ -50,19 +51,31 @@ STRIDE_OPTIONS: dict[str, int] = {
 
 
 def suggest_output_path(video_path: Path, stride: int) -> Path:
-    return DEFAULT_OUTPUT_DIR / f"{video_path.stem}_tracked_every{stride}.mp4"
+    return video_path.parent / f"{video_path.stem}_tracked_every{stride}.mp4"
 
 
-def build_config(video_path: Path, stride: int, output_path: Path) -> TrackerConfig:
+def build_config(
+    video_path: Path,
+    stride: int,
+    output_path: Path,
+    *,
+    track_pen_without_hand: bool = True,
+) -> TrackerConfig:
     if not MIN_STRIDE <= stride <= MAX_STRIDE:
         raise ValueError(f"Frame stride must be between {MIN_STRIDE} and {MAX_STRIDE}")
+    if not output_path.is_absolute():
+        # A bare name typed into the output box is saved next to the input video.
+        output_path = video_path.parent / output_path
     if output_path.suffix.lower() != ".mp4":
         output_path = output_path.with_suffix(".mp4")
+    if output_path.resolve() == video_path.resolve():
+        raise ValueError("The output file would overwrite the input video; choose another name.")
     return TrackerConfig(
         video_path=video_path,
         model_path=DEFAULT_MODEL,
         output_path=output_path,
         frame_stride=stride,
+        track_pen_without_hand=track_pen_without_hand,
         display=False,
     )
 
@@ -86,6 +99,29 @@ def open_folder(path: Path) -> None:
         subprocess.run(["xdg-open", str(path)], check=False)
 
 
+def set_windows_app_id() -> None:
+    # Without its own AppUserModelID, Windows groups the window under python.exe
+    # and shows the Python icon in the taskbar.
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except (AttributeError, OSError):
+        pass
+
+
+def apply_window_icon(root: tk.Tk) -> None:
+    try:
+        if sys.platform == "win32" and ICON_ICO.is_file():
+            root.iconbitmap(default=str(ICON_ICO))
+        elif ICON_PNG.is_file():
+            root.iconphoto(True, tk.PhotoImage(master=root, file=str(ICON_PNG)))
+    except tk.TclError:
+        logger.debug("Could not set window icon", exc_info=True)
+
+
 class PenTrackerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -96,6 +132,7 @@ class PenTrackerApp:
         self.output_var = tk.StringVar()
         self.stride_var = tk.StringVar(value=stride_label(DEFAULT_STRIDE))
         self.fps_var = tk.StringVar()
+        self.pen_without_hand_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Choose a video to start.")
 
         self._video_fps: float | None = None
@@ -135,21 +172,28 @@ class PenTrackerApp:
         )
 
         ttk.Label(frame, text="Output file:").grid(row=3, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=self.output_var, width=60).grid(
-            row=3, column=1, sticky="ew", padx=6
-        )
+        output_entry = ttk.Entry(frame, textvariable=self.output_var, width=60)
+        output_entry.grid(row=3, column=1, sticky="ew", padx=6)
+        output_entry.bind("<Key>", lambda _event: self._mark_output_chosen())
         self.save_button = ttk.Button(frame, text="Save as...", command=self._choose_output)
         self.save_button.grid(row=3, column=2, sticky="ew")
 
+        self.pen_without_hand_check = ttk.Checkbutton(
+            frame,
+            text="Follow the pen when no hand is visible",
+            variable=self.pen_without_hand_var,
+        )
+        self.pen_without_hand_check.grid(row=4, column=1, sticky="w", padx=6, pady=(4, 0))
+
         self.progress_bar = ttk.Progressbar(frame, mode="determinate", maximum=100)
-        self.progress_bar.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        self.progress_bar.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(12, 4))
 
         ttk.Label(frame, textvariable=self.status_var, wraplength=520).grid(
-            row=5, column=0, columnspan=3, sticky="w"
+            row=6, column=0, columnspan=3, sticky="w"
         )
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=6, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        buttons.grid(row=7, column=0, columnspan=3, sticky="e", pady=(12, 0))
         self.open_folder_button = ttk.Button(
             buttons, text="Open output folder", command=self._open_output_folder, state="disabled"
         )
@@ -181,16 +225,25 @@ class PenTrackerApp:
 
     def _choose_output(self) -> None:
         current = Path(self.output_var.get()) if self.output_var.get() else None
+        if current is not None and current.is_absolute():
+            initial_dir = current.parent
+        elif self.video_var.get():
+            initial_dir = Path(self.video_var.get()).parent
+        else:
+            initial_dir = DEFAULT_OUTPUT_DIR
         filename = filedialog.asksaveasfilename(
             title="Save output video as",
             defaultextension=".mp4",
             filetypes=[("MP4 video", "*.mp4")],
-            initialdir=str(current.parent if current else DEFAULT_OUTPUT_DIR),
+            initialdir=str(initial_dir),
             initialfile=current.name if current else "",
         )
         if filename:
             self.output_var.set(filename)
             self._output_user_chosen = True
+
+    def _mark_output_chosen(self) -> None:
+        self._output_user_chosen = True
 
     def _on_stride_changed(self) -> None:
         if self.video_var.get() and not self._output_user_chosen:
@@ -214,6 +267,7 @@ class PenTrackerApp:
         self.browse_button.configure(state=idle_state)
         self.save_button.configure(state=idle_state)
         self.stride_box.configure(state="disabled" if running else "readonly")
+        self.pen_without_hand_check.configure(state=idle_state)
         self.cancel_button.configure(state="normal" if running else "disabled")
 
     def _run(self) -> None:
@@ -226,7 +280,10 @@ class PenTrackerApp:
 
         try:
             config = build_config(
-                Path(self.video_var.get()), self.stride, Path(self.output_var.get())
+                Path(self.video_var.get()),
+                self.stride,
+                Path(self.output_var.get()),
+                track_pen_without_hand=self.pen_without_hand_var.get(),
             )
         except ValueError as exc:
             messagebox.showerror("Pen Tracking", str(exc))
@@ -333,7 +390,9 @@ class PenTrackerApp:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    set_windows_app_id()
     root = tk.Tk()
+    apply_window_icon(root)
     PenTrackerApp(root)
     root.mainloop()
     return 0

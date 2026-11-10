@@ -2,7 +2,9 @@
 
 Markerless hand and pen tracking for navigation video analysis (AInav Core).
 
-Detects hand landmarks with MediaPipe and tracks the pen tip held in the hand using OpenCV color segmentation guided by finger geometry.
+Detects hand landmarks with MediaPipe and tracks the pen tip with OpenCV.
+
+The pen is found by its own appearance in every frame: a dark, thin shaft on a brighter surface, followed by the light sharpened wood and the graphite point, which is then re-located on the full-resolution frame. When a hand is visible it only tells the tracker which dark shape is the held pen; when no hand is visible (for example at the start of a video) the pen is still followed. Each new tip is checked against the recent average motion, and a sudden jump is ignored unless it persists for several frames; a dark shape without a sharpened point (such as a gap between fingers) is never taken as the tip. If the pen is briefly lost, the last position is kept for a few frames. Pass `--no-pen-without-hand` to only track the pen while a hand is visible.
 
 ## Requirements
 
@@ -85,7 +87,12 @@ pen-tracker-gui                  # after pip install -e .
 python -m pen_tracking.gui       # equivalent
 ```
 
-On Windows you can also double-click `scripts\run_gui.bat`. Processing runs in the background with a progress bar and can be cancelled; a cancelled run keeps the partial output.
+On Windows you can also double-click `scripts\run_gui.bat`, or create a "Pen Tracking" Desktop shortcut (with the app icon from `assets/`) once:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\create_desktop_shortcut.ps1
+```
+ Processing runs in the background with a progress bar and can be cancelled; a cancelled run keeps the partial output.
 
 ### Cross-platform helper (any OS)
 

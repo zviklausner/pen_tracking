@@ -22,6 +22,7 @@ class TrackerConfig:
     pen_max_value: int = 160
     pen_axis_distance: float = 20.0
     pen_smoothing: float = 0.65
+    track_pen_without_hand: bool = True
     display: bool = False
     quit_key: str = "q"
 

@@ -90,6 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Temporal smoothing factor for pen tip (0-1, default: 0.65)",
     )
     parser.add_argument(
+        "--no-pen-without-hand",
+        action="store_true",
+        help="Only track the pen while a hand is detected (default: also find it by its look)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -117,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         pen_max_value=args.pen_max_value,
         pen_axis_distance=args.pen_axis_distance,
         pen_smoothing=args.pen_smoothing,
+        track_pen_without_hand=not args.no_pen_without_hand,
         display=args.display,
     )
 
