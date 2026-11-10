@@ -23,7 +23,14 @@ from pen_tracking.config import (
     TrackMode,
     TrackerConfig,
 )
-from pen_tracking.paths import DEFAULT_MODEL, DEFAULT_OUTPUT_DIR, ICON_ICO, ICON_PNG
+from pen_tracking.paths import (
+    DEFAULT_MODEL,
+    DEFAULT_OUTPUT_DIR,
+    ICON_ICO,
+    ICON_PNG,
+    LOGO_PNG,
+    LOGO_UI_PNG,
+)
 from pen_tracking.video_processor import ProcessingStats, process_video
 
 logger = logging.getLogger(__name__)
@@ -168,7 +175,7 @@ def apply_window_icon(root: tk.Tk) -> None:
 class PenTrackerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Pen Tracking")
+        self.root.title("AInav")
         self.root.resizable(True, False)
 
         self.video_var = tk.StringVar()
@@ -192,6 +199,7 @@ class PenTrackerApp:
         self._events: queue.Queue[tuple] = queue.Queue()
         self._stop_event: threading.Event | None = None
         self._worker: threading.Thread | None = None
+        self._logo_image: tk.PhotoImage | None = None
 
         self._build_widgets()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -210,7 +218,9 @@ class PenTrackerApp:
         self.root.columnconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
 
-        ttk.Label(frame, text="Start folder:").grid(row=0, column=0, sticky="w", pady=4)
+        self._place_logo(frame)
+
+        ttk.Label(frame, text="Start folder:").grid(row=1, column=0, sticky="w", pady=4)
         self.root_box = ttk.Combobox(
             frame,
             textvariable=self.root_var,
@@ -218,29 +228,29 @@ class PenTrackerApp:
             state="readonly",
             width=58,
         )
-        self.root_box.grid(row=0, column=1, sticky="ew", padx=6)
+        self.root_box.grid(row=1, column=1, sticky="ew", padx=6)
         self.root_box.bind("<<ComboboxSelected>>", lambda _event: self._on_root_chosen())
         self.folder_button = ttk.Button(
             frame, text="Choose folder...", command=self._choose_folder
         )
-        self.folder_button.grid(row=0, column=2, sticky="ew")
+        self.folder_button.grid(row=1, column=2, sticky="ew")
 
-        ttk.Label(frame, text="Input video:").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Input video:").grid(row=2, column=0, sticky="w", pady=4)
         self.video_entry = ttk.Entry(frame, textvariable=self.video_var, width=60)
-        self.video_entry.grid(row=1, column=1, sticky="ew", padx=6)
+        self.video_entry.grid(row=2, column=1, sticky="ew", padx=6)
         self.video_entry.bind("<FocusOut>", lambda _event: self._on_video_path_edited())
         self.video_entry.bind("<Return>", lambda _event: self._on_video_path_edited())
         self.browse_button = ttk.Button(frame, text="Browse...", command=self._choose_video)
-        self.browse_button.grid(row=1, column=2, sticky="ew")
+        self.browse_button.grid(row=2, column=2, sticky="ew")
 
-        ttk.Label(frame, text="Output file:").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Output file:").grid(row=3, column=0, sticky="w", pady=4)
         output_entry = ttk.Entry(frame, textvariable=self.output_var, width=60)
-        output_entry.grid(row=2, column=1, sticky="ew", padx=6)
+        output_entry.grid(row=3, column=1, sticky="ew", padx=6)
         output_entry.bind("<Key>", lambda _event: self._mark_output_chosen())
         self.save_button = ttk.Button(frame, text="Browse...", command=self._choose_output)
-        self.save_button.grid(row=2, column=2, sticky="ew")
+        self.save_button.grid(row=3, column=2, sticky="ew")
 
-        ttk.Label(frame, text="Frames to process:").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Frames to process:").grid(row=4, column=0, sticky="w", pady=4)
         self.stride_box = ttk.Combobox(
             frame,
             textvariable=self.stride_var,
@@ -248,15 +258,15 @@ class PenTrackerApp:
             state="readonly",
             width=20,
         )
-        self.stride_box.grid(row=3, column=1, sticky="w", padx=6)
+        self.stride_box.grid(row=4, column=1, sticky="w", padx=6)
         self.stride_box.bind("<<ComboboxSelected>>", lambda _event: self._on_stride_changed())
         ttk.Label(frame, textvariable=self.fps_var, foreground="gray").grid(
-            row=4, column=1, sticky="w", padx=6
+            row=5, column=1, sticky="w", padx=6
         )
 
-        ttk.Label(frame, text="Track:").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Track:").grid(row=6, column=0, sticky="w", pady=4)
         mode_row = ttk.Frame(frame)
-        mode_row.grid(row=5, column=1, sticky="w", padx=6)
+        mode_row.grid(row=6, column=1, sticky="w", padx=6)
         self.mode_buttons: list[ttk.Radiobutton] = []
         for label in MODE_LABELS:
             button = ttk.Radiobutton(
@@ -274,11 +284,11 @@ class PenTrackerApp:
             text="Follow the pen when no hand is visible",
             variable=self.pen_without_hand_var,
         )
-        self.pen_without_hand_check.grid(row=6, column=1, sticky="w", padx=6, pady=(4, 0))
+        self.pen_without_hand_check.grid(row=7, column=1, sticky="w", padx=6, pady=(4, 0))
 
-        ttk.Label(frame, text="Tracking line:").grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Tracking line:").grid(row=8, column=0, sticky="w", pady=4)
         color_row = ttk.Frame(frame)
-        color_row.grid(row=7, column=1, sticky="w", padx=6)
+        color_row.grid(row=8, column=1, sticky="w", padx=6)
         self.line_color_box = ttk.Combobox(
             color_row,
             textvariable=self.line_color_var,
@@ -297,17 +307,17 @@ class PenTrackerApp:
             text="Open the output video automatically when done",
             variable=self.open_when_done_var,
         )
-        self.open_when_done_check.grid(row=8, column=1, sticky="w", padx=6, pady=(4, 0))
+        self.open_when_done_check.grid(row=9, column=1, sticky="w", padx=6, pady=(4, 0))
 
         self.progress_bar = ttk.Progressbar(frame, mode="determinate", maximum=100)
-        self.progress_bar.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        self.progress_bar.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(12, 4))
 
         ttk.Label(frame, textvariable=self.status_var, wraplength=520).grid(
-            row=10, column=0, columnspan=3, sticky="w"
+            row=11, column=0, columnspan=3, sticky="w"
         )
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=11, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        buttons.grid(row=12, column=0, columnspan=3, sticky="e", pady=(12, 0))
         self._on_mode_changed()
         self.open_folder_button = ttk.Button(
             buttons, text="Open output folder", command=self._open_output_folder, state="disabled"
@@ -319,6 +329,21 @@ class PenTrackerApp:
         self.cancel_button.pack(side="left", padx=4)
         self.run_button = ttk.Button(buttons, text="Run", command=self._run)
         self.run_button.pack(side="left", padx=4)
+        self.close_button = ttk.Button(buttons, text="Close", command=self._on_close)
+        self.close_button.pack(side="left", padx=4)
+
+    def _place_logo(self, frame: ttk.Frame) -> None:
+        """Show the AInav logo at the top of the window."""
+        logo_path = LOGO_UI_PNG if LOGO_UI_PNG.is_file() else LOGO_PNG
+        if not logo_path.is_file():
+            return
+        try:
+            self._logo_image = tk.PhotoImage(master=self.root, file=str(logo_path))
+        except tk.TclError:
+            logger.debug("Could not load logo image", exc_info=True)
+            return
+        logo_label = ttk.Label(frame, image=self._logo_image)
+        logo_label.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
     @property
     def stride(self) -> int:
@@ -474,10 +499,10 @@ class PenTrackerApp:
 
     def _run(self) -> None:
         if not self.video_var.get():
-            messagebox.showwarning("Pen Tracking", "Please choose an input video.")
+            messagebox.showwarning("AInav", "Please choose an input video.")
             return
         if not self.output_var.get():
-            messagebox.showwarning("Pen Tracking", "Please choose an output file.")
+            messagebox.showwarning("AInav", "Please choose an output file.")
             return
 
         try:
@@ -491,7 +516,7 @@ class PenTrackerApp:
                 open_output_when_done=self.open_when_done_var.get(),
             )
         except ValueError as exc:
-            messagebox.showerror("Pen Tracking", str(exc))
+            messagebox.showerror("AInav", str(exc))
             return
         self.output_var.set(str(config.output_path))
 
@@ -536,7 +561,7 @@ class PenTrackerApp:
             elif kind == "error":
                 finished = True
                 self.status_var.set("Failed.")
-                messagebox.showerror("Pen Tracking", event[1])
+                messagebox.showerror("AInav", event[1])
             elif kind == "done":
                 finished = True
                 self._on_done(event[1], event[2])
@@ -591,7 +616,7 @@ class PenTrackerApp:
     def _on_close(self) -> None:
         if self._worker is not None and self._worker.is_alive():
             if not messagebox.askyesno(
-                "Pen Tracking", "Processing is still running. Stop and exit?"
+                "AInav", "Processing is still running. Stop and exit?"
             ):
                 return
             if self._stop_event is not None:
