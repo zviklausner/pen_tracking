@@ -78,6 +78,35 @@ def _draw_pen(
     )
 
 
+def _draw_frame_badge(frame, frame_index: int) -> None:
+    """Draw a readable frame-number badge in the top-right corner."""
+    height, width = frame.shape[:2]
+    label = f"FRAME {frame_index}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 1.15
+    thickness = 3
+    (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
+    pad_x, pad_y = 20, 16
+    box_w = text_w + pad_x * 2
+    box_h = text_h + baseline + pad_y * 2
+    x1 = max(8, width - box_w - 16)
+    y1 = 14
+    x2 = x1 + box_w
+    y2 = y1 + box_h
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), -1)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+    cv2.putText(
+        frame,
+        label,
+        (x1 + pad_x, y2 - pad_y - baseline // 2),
+        font,
+        scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
 def render_frame(
     frame,
     tracking: FrameTrackingResult,
@@ -86,6 +115,7 @@ def render_frame(
     draw_pen: bool = True,
     overlay_color: tuple[int, int, int] | str = DEFAULT_OVERLAY_COLOR,
     overlay_thickness: int = DEFAULT_OVERLAY_THICKNESS,
+    frame_index: int | None = None,
 ) -> None:
     """Annotate a BGR frame in place with hand and/or pen tracking overlays."""
     if isinstance(overlay_color, str):
@@ -108,6 +138,8 @@ def render_frame(
         _COLOR_TITLE,
         2,
     )
+    if frame_index is not None:
+        _draw_frame_badge(frame, frame_index)
 
     show_hand = draw_hand and tracking.has_hand
     show_pen = draw_pen and tracking.has_pen

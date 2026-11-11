@@ -92,6 +92,17 @@ class PenTracker:
         ):
             # A dark gap between fingers can look like a short pen; never take that tip.
             raw = None
+        # Silver / metallic pens are too bright for the dark-shaft mask; fall back to a
+        # relative-darkness scan guided by the writing grip.
+        if raw is None and hand_landmarks is not None:
+            raw = self._detect_relative_shaft(frame_bgr, hand_landmarks)
+            if raw is not None and fingertip_pixels and self._tip_is_on_the_hand(
+                raw, fingertip_pixels, frame_height
+            ):
+                raw = None
+        if raw is not None and self._tip_is_on_paper(frame_bgr, raw):
+            # A tip on blank paper is always wrong; drop it rather than lock onto drift.
+            raw = None
         if raw is not None:
             self._missed = 0
             if self._is_outlier(raw, frame_height):
@@ -109,6 +120,10 @@ class PenTracker:
         # longer ones report no pen rather than a guess.
         self._missed += 1
         if self._missed > self.max_missed_frames:
+            self._last = None
+            self._history.clear()
+            self._rejected = 0
+        if self._last is not None and self._tip_is_on_paper(frame_bgr, self._last):
             self._last = None
             self._history.clear()
             self._rejected = 0
@@ -148,6 +163,26 @@ class PenTracker:
         tip_along = float(np.dot(tip - grip, axis))
         finger_along = max(float(np.dot(finger - grip, axis)) for finger in fingertips)
         return tip_along < finger_along + 0.02 * frame_height
+
+    @staticmethod
+    def _tip_is_on_paper(frame_bgr, raw: PenDetectionResult) -> bool:
+        """True when the reported tip lands on blank bright paper instead of the pen.
+
+        Only flags empty paper: bright, nearly colourless, with no dark tip nearby.
+        A light wood cone next to graphite must not be rejected.
+        """
+        height, width = frame_bgr.shape[:2]
+        x, y = int(round(raw.tip[0])), int(round(raw.tip[1]))
+        if not (0 <= x < width and 0 <= y < height):
+            return True
+        patch = frame_bgr[max(0, y - 4) : y + 5, max(0, x - 4) : x + 5]
+        if patch.size == 0:
+            return True
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        value = float(hsv[..., 2].mean())
+        sat = float(hsv[..., 1].mean())
+        darkest = float(hsv[..., 2].min())
+        return value > 150 and sat < 40 and darkest > 130
 
     def detect(self, frame_bgr, hand_landmarks) -> PenDetectionResult | None:
         """Estimate the pen from the hand pose, refined by the image."""
@@ -395,6 +430,373 @@ class PenTracker:
             confidence=0.6,
             from_hand=False,
         )
+
+    def _detect_relative_shaft(self, frame_bgr, hand_landmarks) -> PenDetectionResult | None:
+        """Find a bright metallic pen as a thin streak darker than its local surround.
+
+        Stops at bright paper so the tip cannot drift past the real point onto the page.
+        """
+        height, width = frame_bgr.shape[:2]
+        scale = min(1.0, self.detection_height / height)
+        if scale < 1.0:
+            small = cv2.resize(
+                frame_bgr,
+                (int(round(width * scale)), int(round(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            small = frame_bgr
+        img_h, img_w = small.shape[:2]
+
+        points = np.array(
+            [[landmark.x * img_w, landmark.y * img_h] for landmark in hand_landmarks],
+            dtype=np.float64,
+        )
+        thumb, index, mcp = points[4], points[8], points[5]
+        hint = (thumb + index) / 2.0
+        finger = index - mcp
+        finger_span = float(np.linalg.norm(finger))
+        if finger_span < 1e-3:
+            return None
+        finger = finger / finger_span
+        finger_ang = float(np.arctan2(finger[1], finger[0]))
+
+        prev_axis = None
+        if self._last is not None and not self._last.from_hand:
+            prev_axis = np.array(self._last.axis, dtype=np.float64)
+            norm = float(np.linalg.norm(prev_axis))
+            prev_axis = prev_axis / norm if norm > 1e-6 else None
+
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        blur = cv2.GaussianBlur(gray, (31, 31), 0)
+        relative = (blur - gray).clip(0, 255)
+        blackhat = cv2.morphologyEx(
+            gray.astype(np.uint8),
+            cv2.MORPH_BLACKHAT,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21)),
+        ).astype(np.float32)
+        score = relative * 0.35 + blackhat * 0.65
+        sat = hsv[..., 1].astype(np.float32)
+        value = hsv[..., 2].astype(np.float32)
+
+        hough_axes = self._hough_shaft_axes(gray, blackhat, hint, finger, img_h, img_w)
+        center_ang = finger_ang
+        search_span = 48
+        if prev_axis is not None:
+            center_ang = float(np.arctan2(prev_axis[1], prev_axis[0]))
+            search_span = 24
+        angles = {round(center_ang + np.radians(deg), 4) for deg in range(-search_span, search_span + 1, 2)}
+        for axis in hough_axes:
+            angles.add(round(float(np.arctan2(axis[1], axis[0])), 4))
+
+        best: tuple[float, np.ndarray, np.ndarray, np.ndarray] | None = None
+        for ang in sorted(angles):
+            axis = np.array([np.cos(ang), np.sin(ang)], dtype=np.float64)
+            if float(np.dot(axis, finger)) < 0.2:
+                continue
+            tip_vals, tip_pts, tip_value, tip_sat = self._sample_shaft_ray(
+                hint, axis, 0.32 * img_h, 1.0, score, sat, value, img_w, img_h
+            )
+            if len(tip_vals) < 12:
+                continue
+            tip_run, tip_end, tip_mean = self._shaft_run_until_paper(
+                tip_vals, tip_value, tip_sat
+            )
+            if tip_run < 11:
+                continue
+
+            tip_index = tip_end
+            for i in range(tip_end, min(len(tip_pts), tip_end + 45)):
+                if tip_value[i] > 155 and tip_sat[i] < 40:
+                    break
+                if tip_value[i] < 135 or tip_vals[i] >= tip_mean * 0.45:
+                    tip_index = i
+                elif tip_value[i] > 145:
+                    break
+
+            tip = tip_pts[tip_index].copy()
+            darkest = 1e9
+            for i in range(max(0, tip_index - 15), tip_index + 1):
+                if tip_value[i] < darkest:
+                    darkest = float(tip_value[i])
+                    tip = tip_pts[i].copy()
+            tip = self._snap_tip_before_paper(tip, axis, value, sat, img_w, img_h)
+            tip = self._recenter_tip_on_dark(tip, value, sat, img_w, img_h, axis=axis)
+
+            tx, ty = int(round(tip[0])), int(round(tip[1]))
+            if not (0 <= tx < img_w and 0 <= ty < img_h):
+                continue
+            tip_v = float(value[ty, tx])
+            tip_s = float(sat[ty, tx])
+            # Never report a tip sitting on blank paper.
+            if tip_v > 130 or (tip_v > 120 and tip_s < 50):
+                continue
+            tip_along = float(np.dot(tip - hint, axis))
+            if tip_along < 0.028 * img_h:
+                continue
+
+            # Anchor the drawn axis through the grip so a good tip cannot look skewed.
+            anchored = tip - hint
+            anchored_norm = float(np.linalg.norm(anchored))
+            if anchored_norm < 1e-3:
+                continue
+            anchored_axis = anchored / anchored_norm
+            if float(np.dot(anchored_axis, finger)) < 0.15:
+                continue
+            back = hint - anchored_axis * 0.12 * img_h
+            back_vals, back_pts, _, _ = self._sample_shaft_ray(
+                hint, -anchored_axis, 0.28 * img_h, 1.5, score, sat, value, img_w, img_h
+            )
+            if len(back_vals) > 0:
+                back_run, back_end, _ = self._shaft_run_until_paper(
+                    back_vals,
+                    np.full(len(back_vals), 100.0),
+                    np.zeros(len(back_vals)),
+                )
+                if back_run >= 8:
+                    back = back_pts[back_end]
+
+            align = float(np.dot(anchored_axis, finger))
+            hough_bonus = 0.0
+            for hough_axis in hough_axes:
+                if abs(float(np.dot(anchored_axis, hough_axis))) > 0.97:
+                    hough_bonus = max(hough_bonus, 25.0)
+            prev_bonus = (
+                40.0 * max(0.0, float(np.dot(anchored_axis, prev_axis)))
+                if prev_axis is not None
+                else 0.0
+            )
+            # Reward shafts whose midpoint still looks pen-like (not empty paper).
+            mid = hint + anchored_axis * (0.5 * tip_along)
+            mx, my = int(round(mid[0])), int(round(mid[1]))
+            mid_score = float(score[my, mx]) if 0 <= mx < img_w and 0 <= my < img_h else 0.0
+            quality = (
+                tip_run * tip_mean * (0.5 + align)
+                + max(0.0, 135.0 - tip_v) * 3.0
+                + prev_bonus
+                + hough_bonus
+                + tip_along * 0.25
+                + mid_score
+            )
+            if best is None or quality > best[0]:
+                best = (quality, tip, back, anchored_axis)
+
+        if best is None:
+            return None
+
+        _, tip, back, axis = best
+        tip_full = tip / scale
+        back_full = back / scale
+        return PenDetectionResult(
+            tip=(float(tip_full[0]), float(tip_full[1])),
+            grip=(float(back_full[0]), float(back_full[1])),
+            axis=(float(axis[0]), float(axis[1])),
+            confidence=0.55,
+            from_hand=False,
+        )
+
+    @staticmethod
+    def _hough_shaft_axes(
+        gray: np.ndarray,
+        blackhat: np.ndarray,
+        hint: np.ndarray,
+        finger: np.ndarray,
+        img_h: int,
+        img_w: int,
+    ) -> list[np.ndarray]:
+        """Candidate pen axes from Canny edges gated by black-hat response near the grip."""
+        x0 = int(max(0, hint[0] - 0.16 * img_h))
+        x1 = int(min(img_w, hint[0] + 0.16 * img_h))
+        y0 = int(max(0, hint[1] - 0.22 * img_h))
+        y1 = int(min(img_h, hint[1] + 0.32 * img_h))
+        roi = gray[y0:y1, x0:x1].astype(np.uint8)
+        if roi.size == 0:
+            return []
+        edges = cv2.Canny(cv2.GaussianBlur(roi, (5, 5), 0), 40, 120)
+        edges = cv2.bitwise_and(edges, (blackhat[y0:y1, x0:x1] > 6).astype(np.uint8) * 255)
+        lines = cv2.HoughLinesP(
+            edges, 1, np.pi / 180, 20, minLineLength=int(0.07 * img_h), maxLineGap=10
+        )
+        if lines is None:
+            return []
+        axes: list[np.ndarray] = []
+        for x1l, y1l, x2l, y2l in lines.reshape(-1, 4):
+            p1 = np.array([x1l + x0, y1l + y0], dtype=np.float64)
+            p2 = np.array([x2l + x0, y2l + y0], dtype=np.float64)
+            vec = p2 - p1
+            length = float(np.linalg.norm(vec))
+            if length < 1.0:
+                continue
+            direction = vec / length
+            if float(np.dot(direction, finger)) < 0:
+                direction = -direction
+            if float(np.dot(direction, finger)) < 0.25:
+                continue
+            proj = float(np.clip(np.dot(hint - p1, direction), 0.0, length))
+            if float(np.linalg.norm(hint - (p1 + direction * proj))) > 0.05 * img_h:
+                continue
+            axes.append(direction)
+        return axes[:8]
+
+    @staticmethod
+    def _sample_shaft_ray(
+        origin: np.ndarray,
+        axis: np.ndarray,
+        max_dist: float,
+        step: float,
+        score: np.ndarray,
+        sat: np.ndarray,
+        value: np.ndarray,
+        img_w: int,
+        img_h: int,
+    ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, np.ndarray]:
+        """Score a ray for a thin, locally-dark shaft; skin-coloured pixels score zero."""
+        vals: list[float] = []
+        points: list[np.ndarray] = []
+        values: list[float] = []
+        sats: list[float] = []
+        normal = np.array([-axis[1], axis[0]], dtype=np.float64)
+        for along in np.arange(1.0, max_dist, step):
+            point = origin + axis * along
+            x, y = int(round(point[0])), int(round(point[1]))
+            if not (0 <= x < img_w and 0 <= y < img_h):
+                break
+            center = float(score[y, x])
+            saturation = float(sat[y, x])
+            brightness = float(value[y, x])
+            values.append(brightness)
+            sats.append(saturation)
+            points.append(point)
+            if saturation > 95 and brightness > 105:
+                vals.append(0.0)
+                continue
+            side = 0.0
+            samples = 0
+            for offset in (3.0, 5.0):
+                for sign in (-1.0, 1.0):
+                    neighbor = point + normal * sign * offset
+                    nx, ny = int(round(neighbor[0])), int(round(neighbor[1]))
+                    if 0 <= nx < img_w and 0 <= ny < img_h:
+                        side += float(score[ny, nx])
+                        samples += 1
+            side = side / samples if samples else 0.0
+            tip_bonus = 25.0 if brightness < 105 and saturation < 70 else 0.0
+            vals.append(center + 0.8 * max(0.0, center - side) + tip_bonus)
+        return (
+            np.asarray(vals, dtype=np.float64),
+            points,
+            np.asarray(values, dtype=np.float64),
+            np.asarray(sats, dtype=np.float64),
+        )
+
+    @staticmethod
+    def _shaft_run_until_paper(
+        vals: np.ndarray,
+        value: np.ndarray,
+        sat: np.ndarray,
+    ) -> tuple[int, int, float]:
+        """Shaft run that starts at the grip and stops when the ray hits blank paper."""
+        if len(vals) == 0:
+            return 0, 0, 0.0
+        positive = vals[vals > 0]
+        threshold = max(6.0, float(np.median(positive)) * 0.55) if len(positive) else 6.0
+        run_start = -1
+        run_end = -1
+        count = 0
+        for i, score in enumerate(vals):
+            is_paper = value[i] > 152 and sat[i] < 35 and score < 8
+            is_pen = score >= threshold or (value[i] < 125 and sat[i] < 85 and score > 4)
+            if run_start < 0:
+                if is_pen and i <= 14:
+                    run_start = i
+                    run_end = i
+                    count = 1
+                continue
+            if is_paper and count >= 8:
+                break
+            if is_pen:
+                run_end = i
+                count += 1
+                continue
+            if i + 1 < len(vals) and vals[i + 1] >= threshold:
+                continue
+            if count >= 10:
+                break
+            if i <= 14:
+                run_start = -1
+                count = 0
+            else:
+                break
+        if count < 1 or run_end < 0:
+            return 0, 0, 0.0
+        mean_score = float(vals[run_start : run_end + 1].mean())
+        return count, run_end, mean_score
+
+    @staticmethod
+    def _snap_tip_before_paper(
+        tip: np.ndarray,
+        axis: np.ndarray,
+        value: np.ndarray,
+        sat: np.ndarray,
+        img_w: int,
+        img_h: int,
+    ) -> np.ndarray:
+        """Move onto the darkest tip pixel, but never continue onto bright paper."""
+        apex = tip.copy()
+        darkest = 1e9
+        x0, y0 = int(round(tip[0])), int(round(tip[1]))
+        if 0 <= x0 < img_w and 0 <= y0 < img_h:
+            darkest = float(value[y0, x0])
+        for along in np.arange(0.0, 18.0, 0.5):
+            point = tip + axis * along
+            x, y = int(round(point[0])), int(round(point[1]))
+            if not (0 <= x < img_w and 0 <= y < img_h):
+                break
+            brightness = float(value[y, x])
+            saturation = float(sat[y, x])
+            if brightness > 145 and saturation < 50:
+                break
+            if brightness <= darkest + 8 and brightness < 125:
+                apex = point.copy()
+                darkest = min(darkest, brightness)
+        return apex
+
+    @staticmethod
+    def _recenter_tip_on_dark(
+        tip: np.ndarray,
+        value: np.ndarray,
+        sat: np.ndarray,
+        img_w: int,
+        img_h: int,
+        axis: np.ndarray | None = None,
+        radius: int = 5,
+    ) -> np.ndarray:
+        """Snap onto the dark tip apex (darkest, furthest along the shaft)."""
+        x0, y0 = int(round(tip[0])), int(round(tip[1]))
+        x1, y1 = max(0, x0 - radius), max(0, y0 - radius)
+        x2, y2 = min(img_w, x0 + radius + 1), min(img_h, y0 + radius + 1)
+        patch_v = value[y1:y2, x1:x2]
+        patch_s = sat[y1:y2, x1:x2]
+        if patch_v.size == 0:
+            return tip
+        mask = (patch_v < 125) & (patch_s < 90)
+        if not np.any(mask):
+            return tip
+        ys, xs = np.nonzero(mask)
+        pixels = np.stack([xs + x1, ys + y1], axis=1).astype(np.float64)
+        darkness = patch_v[ys, xs].astype(np.float64)
+        if axis is None:
+            order = np.argsort(darkness)
+            return pixels[order[: max(1, min(5, len(order)))]].mean(axis=0)
+        along = (pixels - tip) @ axis
+        # Apex = furthest along among the darkest tip pixels only.
+        dark_enough = darkness <= float(np.min(darkness)) + 15
+        candidates = pixels[dark_enough]
+        along_c = along[dark_enough]
+        if len(candidates) == 0:
+            return tip
+        return candidates[int(np.argmax(along_c))]
 
     def _find_shaft_segments(self, hsv: np.ndarray) -> list[_ShaftSegment]:
         img_h = hsv.shape[0]

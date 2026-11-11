@@ -125,6 +125,7 @@ def process_video(
                     draw_pen=config.track_pen,
                     overlay_color=config.overlay_bgr,
                     overlay_thickness=config.overlay_thickness,
+                    frame_index=frame_index,
                 )
 
                 stats.frames_processed += 1
