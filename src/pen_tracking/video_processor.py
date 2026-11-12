@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import cv2
 
 from pen_tracking.config import TrackerConfig
-from pen_tracking.frame_renderer import render_frame
+from pen_tracking.frame_renderer import PenPath, render_frame
 from pen_tracking.hand_tracker import HandDetectionResult, HandTracker
 from pen_tracking.pen_tracker_cv import PenTracker
 from pen_tracking.tracking_result import FrameTrackingResult
@@ -79,6 +79,7 @@ def process_video(
             )
 
             frame_index = 0
+            pen_path = PenPath()
 
             while cap.isOpened():
                 if stop_event is not None and stop_event.is_set():
@@ -114,6 +115,12 @@ def process_video(
                     else:
                         pen_tracker.reset()
 
+                if config.track_pen:
+                    if pen_detection is not None:
+                        pen_path.add(pen_detection.tip, frame_height=frame.shape[0])
+                    else:
+                        pen_path.break_stroke()
+
                 tracking = FrameTrackingResult(
                     hand=hand_detection,
                     pen=pen_detection,
@@ -123,6 +130,9 @@ def process_video(
                     tracking,
                     draw_hand=config.track_hand,
                     draw_pen=config.track_pen,
+                    draw_pen_line=True,
+                    draw_pen_path=config.track_pen,
+                    pen_path=pen_path,
                     overlay_color=config.overlay_bgr,
                     overlay_thickness=config.overlay_thickness,
                     frame_index=frame_index,

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
+
 import cv2
+import numpy as np
 from mediapipe.tasks.python.vision import HandLandmarksConnections
 
 from pen_tracking.config import DEFAULT_OVERLAY_COLOR, DEFAULT_OVERLAY_THICKNESS, OVERLAY_COLORS_BGR
@@ -38,6 +41,50 @@ def _draw_landmarks(frame, hand_landmarks, width: int, height: int) -> None:
         start_point = (int(start.x * width), int(start.y * height))
         end_point = (int(end.x * width), int(end.y * height))
         cv2.line(frame, start_point, end_point, _COLOR_CONNECTION, 2)
+
+
+class PenPath:
+    """The trail left by the pen tip. A sudden jump starts a new stroke."""
+
+    def __init__(self) -> None:
+        self.strokes: list[list[tuple[float, float]]] = []
+
+    def add(self, tip: tuple[float, float], *, frame_height: int) -> None:
+        point = (float(tip[0]), float(tip[1]))
+        gap = 0.05 * frame_height
+        if self.strokes and self.strokes[-1]:
+            last = self.strokes[-1][-1]
+            jump = math.hypot(point[0] - last[0], point[1] - last[1])
+            if jump > gap:
+                self.strokes.append([point])
+                return
+            self.strokes[-1].append(point)
+            return
+        if not self.strokes:
+            self.strokes.append([point])
+        else:
+            self.strokes[-1].append(point)
+
+    def break_stroke(self) -> None:
+        """Do not connect across a frame where the pen was missing."""
+        if self.strokes and self.strokes[-1]:
+            self.strokes.append([])
+
+
+def _draw_pen_path(
+    frame,
+    path: PenPath,
+    *,
+    color: tuple[int, int, int],
+    thickness: int,
+) -> None:
+    outline = max(thickness + 2, thickness * 2)
+    for stroke in path.strokes:
+        if len(stroke) < 2:
+            continue
+        points = np.array([(int(x), int(y)) for x, y in stroke], dtype=np.int32)
+        cv2.polylines(frame, [points], False, (0, 0, 0), outline, cv2.LINE_AA)
+        cv2.polylines(frame, [points], False, color, thickness, cv2.LINE_AA)
 
 
 def _draw_pen(
@@ -78,33 +125,46 @@ def _draw_pen(
     )
 
 
-def _draw_frame_badge(frame, frame_index: int) -> None:
-    """Draw a readable frame-number badge in the top-right corner."""
+def _draw_top_right_badge(frame, lines: list[str]) -> None:
+    """Draw a readable multi-line badge in the top-right corner."""
+    if not lines:
+        return
     height, width = frame.shape[:2]
-    label = f"FRAME {frame_index}"
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 1.15
     thickness = 3
-    (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
+    sizes = [cv2.getTextSize(line, font, scale, thickness) for line in lines]
+    text_w = max(size[0][0] for size in sizes)
+    text_h = sizes[0][0][1]
+    baseline = sizes[0][1]
+    line_gap = 10
     pad_x, pad_y = 20, 16
     box_w = text_w + pad_x * 2
-    box_h = text_h + baseline + pad_y * 2
+    box_h = pad_y * 2 + len(lines) * text_h + (len(lines) - 1) * line_gap + baseline
     x1 = max(8, width - box_w - 16)
     y1 = 14
     x2 = x1 + box_w
     y2 = y1 + box_h
     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), -1)
     cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
-    cv2.putText(
-        frame,
-        label,
-        (x1 + pad_x, y2 - pad_y - baseline // 2),
-        font,
-        scale,
-        (255, 255, 255),
-        thickness,
-        cv2.LINE_AA,
-    )
+    y = y1 + pad_y + text_h
+    for line in lines:
+        cv2.putText(
+            frame,
+            line,
+            (x1 + pad_x, y),
+            font,
+            scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
+        y += text_h + line_gap
+
+
+def _draw_frame_badge(frame, frame_index: int) -> None:
+    """Draw frame index in the top-right corner."""
+    _draw_top_right_badge(frame, [f"FRAME {frame_index}"])
 
 
 def render_frame(
@@ -113,6 +173,9 @@ def render_frame(
     *,
     draw_hand: bool = True,
     draw_pen: bool = True,
+    draw_pen_line: bool = True,
+    draw_pen_path: bool = False,
+    pen_path: PenPath | None = None,
     overlay_color: tuple[int, int, int] | str = DEFAULT_OVERLAY_COLOR,
     overlay_thickness: int = DEFAULT_OVERLAY_THICKNESS,
     frame_index: int | None = None,
@@ -172,7 +235,10 @@ def render_frame(
         for hand in tracking.hand.hand_landmarks:
             _draw_landmarks(frame, hand, width, height)
 
-    if show_pen and tracking.pen is not None:
+    if draw_pen_path and pen_path is not None:
+        _draw_pen_path(frame, pen_path, color=color, thickness=overlay_thickness)
+
+    if show_pen and draw_pen_line and tracking.pen is not None:
         _draw_pen(
             frame,
             tracking.pen,
