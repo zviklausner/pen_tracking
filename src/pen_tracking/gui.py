@@ -24,12 +24,14 @@ from pen_tracking.config import (
     TrackerConfig,
 )
 from pen_tracking.paths import (
+    DEFAULT_INPUT_DIR,
     DEFAULT_MODEL,
-    DEFAULT_OUTPUT_DIR,
+    DEFAULT_PROCESSED_DIR,
     ICON_ICO,
     ICON_PNG,
     LOGO_PNG,
     LOGO_UI_PNG,
+    ensure_media_dirs,
 )
 from pen_tracking.video_processor import ProcessingStats, process_video
 
@@ -66,7 +68,7 @@ STRIDE_OPTIONS: dict[str, int] = {
 
 
 def suggest_output_path(video_path: Path, stride: int) -> Path:
-    return video_path.parent / f"{video_path.stem}_tracked_every{stride}.mp4"
+    return DEFAULT_PROCESSED_DIR / f"{video_path.stem}_tracked_every{stride}.mp4"
 
 
 MODE_LABELS: dict[str, TrackMode] = {
@@ -98,17 +100,20 @@ def build_config(
     track_mode: TrackMode = DEFAULT_MODE,
     track_pen_without_hand: bool = True,
     overlay_color: OverlayColorName = DEFAULT_OVERLAY_COLOR,
+    path_color: OverlayColorName = DEFAULT_OVERLAY_COLOR,
+    tip_color: OverlayColorName = DEFAULT_OVERLAY_COLOR,
     open_output_when_done: bool = False,
 ) -> TrackerConfig:
     if not MIN_STRIDE <= stride <= MAX_STRIDE:
         raise ValueError(f"Frame stride must be between {MIN_STRIDE} and {MAX_STRIDE}")
     if track_mode not in TRACK_MODES:
         raise ValueError(f"Track mode must be one of {TRACK_MODES}")
-    if overlay_color not in OVERLAY_COLORS_BGR:
-        raise ValueError(f"Line color must be one of {tuple(OVERLAY_COLORS_BGR)}")
+    for name in (overlay_color, path_color, tip_color):
+        if name not in OVERLAY_COLORS_BGR:
+            raise ValueError(f"Line color must be one of {tuple(OVERLAY_COLORS_BGR)}")
     if not output_path.is_absolute():
-        # A bare name typed into the output box is saved next to the input video.
-        output_path = video_path.parent / output_path
+        # A bare name typed into the output box is saved in the processed-video folder.
+        output_path = DEFAULT_PROCESSED_DIR / output_path
     if output_path.suffix.lower() != ".mp4":
         output_path = output_path.with_suffix(".mp4")
     if output_path.resolve() == video_path.resolve():
@@ -121,6 +126,8 @@ def build_config(
         track_mode=track_mode,
         track_pen_without_hand=track_pen_without_hand,
         overlay_color=overlay_color,
+        path_color=path_color,
+        tip_color=tip_color,
         open_output_when_done=open_output_when_done,
         display=False,
     )
@@ -187,6 +194,13 @@ class PenTrackerApp:
         self.line_color_var = tk.StringVar(
             value=LINE_COLOR_LABEL_BY_VALUE[DEFAULT_OVERLAY_COLOR]
         )
+        self.trail_color_var = tk.StringVar(
+            value=LINE_COLOR_LABEL_BY_VALUE[DEFAULT_OVERLAY_COLOR]
+        )
+        self.tip_color_var = tk.StringVar(
+            value=LINE_COLOR_LABEL_BY_VALUE[DEFAULT_OVERLAY_COLOR]
+        )
+        ensure_media_dirs()
         self.open_when_done_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(
             value="Pick a start folder if you want, then Browse for a video (or paste its path)."
@@ -286,38 +300,30 @@ class PenTrackerApp:
         )
         self.pen_without_hand_check.grid(row=7, column=1, sticky="w", padx=6, pady=(4, 0))
 
-        ttk.Label(frame, text="Tracking line:").grid(row=8, column=0, sticky="w", pady=4)
-        color_row = ttk.Frame(frame)
-        color_row.grid(row=8, column=1, sticky="w", padx=6)
-        self.line_color_box = ttk.Combobox(
-            color_row,
-            textvariable=self.line_color_var,
-            values=list(LINE_COLOR_LABELS),
-            state="readonly",
-            width=12,
+        self.line_color_box = self._add_color_picker(
+            frame, 8, "Pen line:", self.line_color_var
         )
-        self.line_color_box.pack(side="left")
-        self.line_color_box.bind("<<ComboboxSelected>>", lambda _event: self._update_color_swatch())
-        self.color_swatch = tk.Canvas(color_row, width=28, height=18, highlightthickness=1)
-        self.color_swatch.pack(side="left", padx=8)
-        self._update_color_swatch()
+        self.trail_color_box = self._add_color_picker(
+            frame, 9, "Trail line:", self.trail_color_var
+        )
+        self.tip_color_box = self._add_color_picker(frame, 10, "Tip:", self.tip_color_var)
 
         self.open_when_done_check = ttk.Checkbutton(
             frame,
             text="Open the output video automatically when done",
             variable=self.open_when_done_var,
         )
-        self.open_when_done_check.grid(row=9, column=1, sticky="w", padx=6, pady=(4, 0))
+        self.open_when_done_check.grid(row=11, column=1, sticky="w", padx=6, pady=(4, 0))
 
         self.progress_bar = ttk.Progressbar(frame, mode="determinate", maximum=100)
-        self.progress_bar.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        self.progress_bar.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(12, 4))
 
         ttk.Label(frame, textvariable=self.status_var, wraplength=520).grid(
-            row=11, column=0, columnspan=3, sticky="w"
+            row=13, column=0, columnspan=3, sticky="w"
         )
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=12, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        buttons.grid(row=14, column=0, columnspan=3, sticky="e", pady=(12, 0))
         self._on_mode_changed()
         self.open_folder_button = ttk.Button(
             buttons, text="Open output folder", command=self._open_output_folder, state="disabled"
@@ -357,13 +363,48 @@ class PenTrackerApp:
     def overlay_color(self) -> OverlayColorName:
         return LINE_COLOR_LABELS.get(self.line_color_var.get(), DEFAULT_OVERLAY_COLOR)
 
-    def _update_color_swatch(self) -> None:
-        bgr = OVERLAY_COLORS_BGR[self.overlay_color]
-        # Canvas colors are hex RGB.
+    @property
+    def path_color(self) -> OverlayColorName:
+        return LINE_COLOR_LABELS.get(self.trail_color_var.get(), DEFAULT_OVERLAY_COLOR)
+
+    @property
+    def tip_color(self) -> OverlayColorName:
+        return LINE_COLOR_LABELS.get(self.tip_color_var.get(), DEFAULT_OVERLAY_COLOR)
+
+    def _add_color_picker(
+        self,
+        frame: ttk.Frame,
+        row: int,
+        label: str,
+        variable: tk.StringVar,
+    ) -> ttk.Combobox:
+        ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4)
+        color_row = ttk.Frame(frame)
+        color_row.grid(row=row, column=1, sticky="w", padx=6)
+        box = ttk.Combobox(
+            color_row,
+            textvariable=variable,
+            values=list(LINE_COLOR_LABELS),
+            state="readonly",
+            width=12,
+        )
+        box.pack(side="left")
+        swatch = tk.Canvas(color_row, width=28, height=18, highlightthickness=1)
+        swatch.pack(side="left", padx=8)
+        box.bind(
+            "<<ComboboxSelected>>",
+            lambda _event, canvas=swatch, source=variable: self._paint_swatch(canvas, source),
+        )
+        self._paint_swatch(swatch, variable)
+        return box
+
+    def _paint_swatch(self, canvas: tk.Canvas, variable: tk.StringVar) -> None:
+        name = LINE_COLOR_LABELS.get(variable.get(), DEFAULT_OVERLAY_COLOR)
+        bgr = OVERLAY_COLORS_BGR[name]
         hex_color = f"#{bgr[2]:02x}{bgr[1]:02x}{bgr[0]:02x}"
-        self.color_swatch.configure(bg=hex_color)
-        self.color_swatch.delete("all")
-        self.color_swatch.create_rectangle(0, 0, 28, 18, fill=hex_color, outline="")
+        canvas.configure(bg=hex_color)
+        canvas.delete("all")
+        canvas.create_rectangle(0, 0, 28, 18, fill=hex_color, outline="")
 
     def _on_mode_changed(self) -> None:
         # Hand-only mode has no pen to follow; pen-only always tracks without a hand.
@@ -418,10 +459,11 @@ class PenTrackerApp:
         self.status_var.set("Ready.")
 
     def _choose_video(self) -> None:
+        ensure_media_dirs()
         filename = filedialog.askopenfilename(
             parent=self.root,
             title="Choose input video",
-            initialdir=str(self._current_start_folder()),
+            initialdir=str(DEFAULT_INPUT_DIR),
             filetypes=VIDEO_FILETYPES,
         )
         if not filename:
@@ -436,22 +478,24 @@ class PenTrackerApp:
         self.status_var.set("Ready.")
 
     def _choose_output(self) -> None:
+        ensure_media_dirs()
         current = Path(self.output_var.get()) if self.output_var.get() else None
-        if current is not None and current.is_absolute():
+        if current is not None and current.is_absolute() and current.parent.is_dir():
             initial_dir = current.parent
             initial_name = current.name
         elif self.video_var.get():
-            initial_dir = Path(self.video_var.get()).parent
-            initial_name = suggest_output_path(Path(self.video_var.get()), self.stride).name
+            suggested = suggest_output_path(Path(self.video_var.get()), self.stride)
+            initial_dir = suggested.parent
+            initial_name = suggested.name
         else:
-            initial_dir = self._current_start_folder()
+            initial_dir = DEFAULT_PROCESSED_DIR
             initial_name = "tracked.mp4"
         filename = filedialog.asksaveasfilename(
             parent=self.root,
             title="Choose output video",
             defaultextension=".mp4",
             filetypes=[("MP4 video", "*.mp4")],
-            initialdir=str(initial_dir if initial_dir.is_dir() else self._current_start_folder()),
+            initialdir=str(initial_dir if initial_dir.is_dir() else DEFAULT_PROCESSED_DIR),
             initialfile=initial_name,
         )
         if filename:
@@ -488,6 +532,8 @@ class PenTrackerApp:
         self.root_box.configure(state="disabled" if running else "readonly")
         self.stride_box.configure(state="disabled" if running else "readonly")
         self.line_color_box.configure(state="disabled" if running else "readonly")
+        self.trail_color_box.configure(state="disabled" if running else "readonly")
+        self.tip_color_box.configure(state="disabled" if running else "readonly")
         self.open_when_done_check.configure(state=idle_state)
         for button in self.mode_buttons:
             button.configure(state=idle_state)
@@ -513,6 +559,8 @@ class PenTrackerApp:
                 track_mode=self.track_mode,
                 track_pen_without_hand=self.pen_without_hand_var.get(),
                 overlay_color=self.overlay_color,
+                path_color=self.path_color,
+                tip_color=self.tip_color,
                 open_output_when_done=self.open_when_done_var.get(),
             )
         except ValueError as exc:

@@ -134,6 +134,8 @@ def process_video(
                     draw_pen_path=config.track_pen,
                     pen_path=pen_path,
                     overlay_color=config.overlay_bgr,
+                    path_color=config.path_bgr,
+                    tip_color=config.tip_bgr,
                     overlay_thickness=config.overlay_thickness,
                     frame_index=frame_index,
                 )

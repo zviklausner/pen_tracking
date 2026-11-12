@@ -10,7 +10,7 @@ from pen_tracking.gui import (
     stride_label,
     suggest_output_path,
 )
-from pen_tracking.paths import DEFAULT_MODEL
+from pen_tracking.paths import DEFAULT_MODEL, DEFAULT_PROCESSED_DIR
 
 
 def test_stride_options_cover_one_to_ten() -> None:
@@ -32,14 +32,14 @@ def test_stride_label(stride: int, label: str) -> None:
     assert STRIDE_OPTIONS[label] == stride
 
 
-def test_suggest_output_path_is_next_to_input_video() -> None:
+def test_suggest_output_path_uses_the_processed_folder() -> None:
     path = suggest_output_path(Path("C:/videos/palm1.MOV"), 3)
-    assert path == Path("C:/videos/palm1_tracked_every3.mp4")
+    assert path == DEFAULT_PROCESSED_DIR / "palm1_tracked_every3.mp4"
 
 
-def test_build_config_saves_bare_name_next_to_input_video(tmp_path: Path) -> None:
+def test_build_config_saves_bare_name_in_the_processed_folder(tmp_path: Path) -> None:
     config = build_config(tmp_path / "in.mov", 2, Path("demo"))
-    assert config.output_path == tmp_path / "demo.mp4"
+    assert config.output_path == DEFAULT_PROCESSED_DIR / "demo.mp4"
 
 
 def test_build_config_refuses_to_overwrite_input(tmp_path: Path) -> None:
@@ -82,10 +82,16 @@ def test_build_config_line_color_and_auto_open(tmp_path: Path) -> None:
         2,
         tmp_path / "out.mp4",
         overlay_color="cyan",
+        path_color="orange",
+        tip_color="red",
         open_output_when_done=True,
     )
     assert config.overlay_color == "cyan"
     assert config.overlay_bgr == (255, 255, 0)
+    assert config.path_color == "orange"
+    assert config.path_bgr == (0, 165, 255)
+    assert config.tip_color == "red"
+    assert config.tip_bgr == (0, 0, 255)
     assert config.open_output_when_done is True
     assert config.overlay_thickness >= 4
 

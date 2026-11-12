@@ -45,6 +45,8 @@ class TrackerConfig:
     track_mode: TrackMode = "both"
     track_pen_without_hand: bool = True
     overlay_color: OverlayColorName = DEFAULT_OVERLAY_COLOR
+    path_color: OverlayColorName = DEFAULT_OVERLAY_COLOR
+    tip_color: OverlayColorName = DEFAULT_OVERLAY_COLOR
     overlay_thickness: int = DEFAULT_OVERLAY_THICKNESS
     open_output_when_done: bool = False
     display: bool = False
@@ -70,8 +72,9 @@ class TrackerConfig:
             )
         if self.frame_stride <= 0:
             raise ValueError("frame_stride must be positive")
-        if self.overlay_color not in OVERLAY_COLORS_BGR:
-            raise ValueError(f"overlay_color must be one of {tuple(OVERLAY_COLORS_BGR)}")
+        for name in (self.overlay_color, self.path_color, self.tip_color):
+            if name not in OVERLAY_COLORS_BGR:
+                raise ValueError(f"Line color must be one of {tuple(OVERLAY_COLORS_BGR)}")
         if self.overlay_thickness <= 0:
             raise ValueError("overlay_thickness must be positive")
         if self.output_path is not None:
@@ -80,3 +83,11 @@ class TrackerConfig:
     @property
     def overlay_bgr(self) -> tuple[int, int, int]:
         return OVERLAY_COLORS_BGR[self.overlay_color]
+
+    @property
+    def path_bgr(self) -> tuple[int, int, int]:
+        return OVERLAY_COLORS_BGR[self.path_color]
+
+    @property
+    def tip_bgr(self) -> tuple[int, int, int]:
+        return OVERLAY_COLORS_BGR[self.tip_color]

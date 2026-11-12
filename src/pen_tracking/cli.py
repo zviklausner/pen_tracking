@@ -95,11 +95,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="both",
         help="What to track: both (default), hand only, or pen only",
     )
+    color_choices = ("yellow", "lime", "cyan", "magenta", "orange", "white", "red")
     parser.add_argument(
         "--line-color",
-        choices=("yellow", "lime", "cyan", "magenta", "orange", "white", "red"),
+        choices=color_choices,
         default="yellow",
-        help="Color of the pen tracking line (default: yellow)",
+        help="Color of the line drawn on the pen (default: yellow)",
+    )
+    parser.add_argument(
+        "--trail-color",
+        choices=color_choices,
+        default="yellow",
+        help="Color of the trail left by the pen tip (default: yellow)",
+    )
+    parser.add_argument(
+        "--tip-color",
+        choices=color_choices,
+        default="yellow",
+        help="Color of the pen tip marker (default: yellow)",
     )
     parser.add_argument(
         "--open-output",
@@ -142,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         track_mode=args.mode,
         track_pen_without_hand=not args.no_pen_without_hand,
         overlay_color=args.line_color,
+        path_color=args.trail_color,
+        tip_color=args.tip_color,
         open_output_when_done=args.open_output,
         display=args.display,
     )

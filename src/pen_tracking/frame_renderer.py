@@ -87,11 +87,18 @@ def _draw_pen_path(
         cv2.polylines(frame, [points], False, color, thickness, cv2.LINE_AA)
 
 
+def _overlay_bgr(color: tuple[int, int, int] | str) -> tuple[int, int, int]:
+    if isinstance(color, str):
+        return OVERLAY_COLORS_BGR[color]
+    return color
+
+
 def _draw_pen(
     frame,
     pen,
     *,
     color: tuple[int, int, int],
+    tip_color: tuple[int, int, int],
     thickness: int,
 ) -> None:
     grip = (int(pen.grip[0]), int(pen.grip[1]))
@@ -104,7 +111,7 @@ def _draw_pen(
     cv2.circle(frame, grip, radius, (0, 0, 0), -1)
     cv2.circle(frame, grip, max(4, thickness), color, -1)
     cv2.circle(frame, tip, radius + 2, (0, 0, 0), -1)
-    cv2.circle(frame, tip, radius, color, -1)
+    cv2.circle(frame, tip, radius, tip_color, -1)
     cv2.putText(
         frame,
         "PEN TIP",
@@ -120,7 +127,7 @@ def _draw_pen(
         (tip[0] + 10, tip[1] - 10),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
-        color,
+        tip_color,
         2,
     )
 
@@ -177,14 +184,15 @@ def render_frame(
     draw_pen_path: bool = False,
     pen_path: PenPath | None = None,
     overlay_color: tuple[int, int, int] | str = DEFAULT_OVERLAY_COLOR,
+    path_color: tuple[int, int, int] | str | None = None,
+    tip_color: tuple[int, int, int] | str | None = None,
     overlay_thickness: int = DEFAULT_OVERLAY_THICKNESS,
     frame_index: int | None = None,
 ) -> None:
     """Annotate a BGR frame in place with hand and/or pen tracking overlays."""
-    if isinstance(overlay_color, str):
-        color = OVERLAY_COLORS_BGR[overlay_color]
-    else:
-        color = overlay_color
+    color = _overlay_bgr(overlay_color)
+    trail = _overlay_bgr(overlay_color if path_color is None else path_color)
+    tip = _overlay_bgr(overlay_color if tip_color is None else tip_color)
 
     if draw_hand and draw_pen:
         title = TITLE_BOTH
@@ -236,13 +244,14 @@ def render_frame(
             _draw_landmarks(frame, hand, width, height)
 
     if draw_pen_path and pen_path is not None:
-        _draw_pen_path(frame, pen_path, color=color, thickness=overlay_thickness)
+        _draw_pen_path(frame, pen_path, color=trail, thickness=overlay_thickness)
 
     if show_pen and draw_pen_line and tracking.pen is not None:
         _draw_pen(
             frame,
             tracking.pen,
             color=color,
+            tip_color=tip,
             thickness=overlay_thickness,
         )
 

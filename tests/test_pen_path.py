@@ -31,27 +31,34 @@ def test_pen_path_does_not_connect_across_a_missing_frame() -> None:
     assert path.strokes[-1] == [(18, 16)]
 
 
-def test_render_draws_the_tip_path_in_the_overlay_color() -> None:
-    frame = np.full((80, 120, 3), 255, np.uint8)
+def test_render_draws_the_trail_and_tip_in_their_own_colors() -> None:
+    frame = np.full((90, 120, 3), 255, np.uint8)
     path = PenPath()
-    path.add((10, 40), frame_height=80)
-    path.add((70, 40), frame_height=80)
+    path.add((10, 70), frame_height=2000)
+    path.add((70, 70), frame_height=2000)
+    pen = type("Pen", (), {"grip": (20.0, 10.0), "tip": (20.0, 40.0)})()
     tracking = FrameTrackingResult(
         hand=HandDetectionResult(hand_landmarks=[], handedness=[]),
-        pen=None,
+        pen=pen,
     )
 
     render_frame(
         frame,
         tracking,
         draw_hand=False,
-        draw_pen=False,
         draw_pen_path=True,
         pen_path=path,
         overlay_color="yellow",
+        path_color="cyan",
+        tip_color="red",
         overlay_thickness=3,
     )
 
-    # Yellow in BGR is (0, 255, 255), drawn along y=40 between the points.
-    assert frame[40, 40, 1] > 200
-    assert frame[40, 40, 2] > 200
+    # Cyan trail along y=70. The shaft stays yellow. The tip marker is red.
+    assert frame[70, 40, 0] > 200
+    assert frame[70, 40, 1] > 200
+    assert frame[70, 40, 2] < 40
+    assert frame[20, 20, 1] > 200
+    assert frame[20, 20, 2] > 200
+    assert int(frame[40, 20, 2]) > 200
+    assert int(frame[40, 20, 1]) < 40
