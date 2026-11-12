@@ -890,56 +890,81 @@ class PenTracker:
         img_h: int,
     ) -> np.ndarray | None:
         """Locate the visible metallic shaft just above the grip (away from the tip)."""
-        # Pen axis can diverge from the finger; search a cone opposite the fingertips.
+        # Same cone as the old loop: angles, then sideways offsets, then steps up the shaft.
         base_ang = float(np.arctan2(-finger[1], -finger[0]))
-        best_score = -1.0
-        best_point: np.ndarray | None = None
-        for deg in range(-40, 41, 4):
-            ang = base_ang + np.radians(deg)
-            back_dir = np.array([np.cos(ang), np.sin(ang)], dtype=np.float64)
-            normal = np.array([-back_dir[1], back_dir[0]], dtype=np.float64)
-            for off in np.arange(-0.02 * img_h, 0.02 * img_h + 0.1, 1.5):
-                score = 0.0
-                points: list[np.ndarray] = []
-                for along in np.arange(0.045 * img_h, 0.14 * img_h, 2.0):
-                    point = hint + back_dir * along + normal * off
-                    x, y = int(round(point[0])), int(round(point[1]))
-                    if not (0 <= x < img_w and 0 <= y < img_h):
-                        continue
-                    bh = float(blackhat[y, x])
-                    brightness = float(value[y, x])
-                    saturation = float(sat[y, x])
-                    side = 0.0
-                    n = 0
-                    for sign in (-1.0, 1.0):
-                        neighbor = point + normal * sign * 4.0
-                        nx, ny = int(round(neighbor[0])), int(round(neighbor[1]))
-                        if 0 <= nx < img_w and 0 <= ny < img_h:
-                            side += float(blackhat[ny, nx])
-                            n += 1
-                    thin = bh - (side / n if n else 0.0)
-                    if saturation > 100 and brightness > 110:
-                        continue
-                    if thin < 1.2 or bh < 3.5:
-                        continue
-                    metallic = 1.0
-                    if 80 <= brightness <= 220 and saturation < 90:
-                        metallic = 3.0
-                    elif brightness < 75:
-                        metallic = 0.25
-                    score += (bh + thin * 3.0) * metallic
-                    points.append(point)
-                if len(points) < 3:
-                    continue
-                # Prefer shafts that still point roughly toward the fingertips.
-                toward_tip = -back_dir
-                align = max(0.0, float(np.dot(toward_tip, finger)))
-                score *= 0.45 + 0.55 * align
-                score *= 1.0 / (1.0 + abs(off) / (0.025 * img_h))
-                if score > best_score:
-                    best_score = score
-                    best_point = points[len(points) // 2].copy()
-        return best_point
+        degrees = np.arange(-40, 41, 4)
+        angles = base_ang + np.radians(degrees)
+        back = np.stack((np.cos(angles), np.sin(angles)), axis=1)
+        normal = np.stack((-back[:, 1], back[:, 0]), axis=1)
+        offsets = np.arange(-0.02 * img_h, 0.02 * img_h + 0.1, 1.5)
+        along = np.arange(0.045 * img_h, 0.14 * img_h, 2.0)
+        points = (
+            hint
+            + back[:, None, None, :] * along[None, None, :, None]
+            + normal[:, None, None, :] * offsets[None, :, None, None]
+        )
+        xy = np.rint(points).astype(np.int32)
+        inside = (
+            (xy[..., 0] >= 0)
+            & (xy[..., 0] < img_w)
+            & (xy[..., 1] >= 0)
+            & (xy[..., 1] < img_h)
+        )
+        brightness = np.zeros(inside.shape, dtype=np.float64)
+        saturation = np.zeros(inside.shape, dtype=np.float64)
+        ridge = np.zeros(inside.shape, dtype=np.float64)
+        if np.any(inside):
+            ys = xy[..., 1][inside]
+            xs = xy[..., 0][inside]
+            brightness[inside] = value[ys, xs]
+            saturation[inside] = sat[ys, xs]
+            ridge[inside] = blackhat[ys, xs]
+        sign = np.array([-4.0, 4.0], dtype=np.float64).reshape(1, 1, 1, 2, 1)
+        neighbors = points[..., None, :] + normal[:, None, None, None, :] * sign
+        nxy = np.rint(neighbors).astype(np.int32)
+        neighbor_inside = (
+            (nxy[..., 0] >= 0)
+            & (nxy[..., 0] < img_w)
+            & (nxy[..., 1] >= 0)
+            & (nxy[..., 1] < img_h)
+        )
+        neighbor_ridge = np.zeros(neighbor_inside.shape, dtype=np.float64)
+        if np.any(neighbor_inside):
+            neighbor_ridge[neighbor_inside] = blackhat[
+                nxy[..., 1][neighbor_inside], nxy[..., 0][neighbor_inside]
+            ]
+        neighbor_count = neighbor_inside.sum(axis=-1)
+        side = np.zeros(inside.shape, dtype=np.float64)
+        np.divide(
+            neighbor_ridge.sum(axis=-1),
+            neighbor_count,
+            out=side,
+            where=neighbor_count > 0,
+        )
+        thin = ridge - side
+        kept = (
+            inside
+            & ~((saturation > 100) & (brightness > 110))
+            & (thin >= 1.2)
+            & (ridge >= 3.5)
+        )
+        metallic = np.ones(inside.shape, dtype=np.float64)
+        metallic[(brightness >= 80) & (brightness <= 220) & (saturation < 90)] = 3.0
+        metallic[kept & (brightness < 75) & (metallic == 1.0)] = 0.25
+        contribution = np.where(kept, (ridge + thin * 3.0) * metallic, 0.0)
+        kept_count = kept.sum(axis=-1)
+        align = np.maximum(0.0, (-back) @ finger)
+        scores = contribution.sum(axis=-1)
+        scores *= 0.45 + 0.55 * align[:, None]
+        scores *= 1.0 / (1.0 + np.abs(offsets) / (0.025 * img_h))
+        scores = np.where(kept_count >= 3, scores, -1.0)
+        if float(scores.max()) < 0.0:
+            return None
+        flat = int(np.argmax(scores))
+        chosen_angle, chosen_offset = np.unravel_index(flat, scores.shape)
+        kept_steps = np.flatnonzero(kept[chosen_angle, chosen_offset])
+        middle = kept_steps[len(kept_steps) // 2]
+        return points[chosen_angle, chosen_offset, middle].copy()
 
     @staticmethod
     def _tip_from_upper_shaft(
@@ -1033,19 +1058,23 @@ class PenTracker:
         """Translate the shaft sideways onto the strongest ridge (keeps angle)."""
         normal = np.array([-axis[1], axis[0]], dtype=np.float64)
         grip_along = max(8.0, float(np.dot(hint - tip, -axis)))
-        best_off = 0.0
-        best_score = -1.0
-        for off in np.arange(-0.055 * img_h, 0.055 * img_h + 0.1, 1.0):
-            score = 0.0
-            for along in np.arange(4.0, grip_along + 0.07 * img_h, 2.0):
-                point = tip + normal * off - axis * along
-                x, y = int(round(point[0])), int(round(point[1]))
-                if 0 <= x < img_w and 0 <= y < img_h:
-                    score += float(blackhat[y, x])
-            if score > best_score:
-                best_score = score
-                best_off = off
-        return tip + normal * best_off
+        offsets = np.arange(-0.055 * img_h, 0.055 * img_h + 0.1, 1.0)
+        along = np.arange(4.0, grip_along + 0.07 * img_h, 2.0)
+        if offsets.size == 0:
+            return tip
+        samples = tip + normal * offsets[:, None, None] - axis * along[None, :, None]
+        xy = np.rint(samples).astype(np.int32)
+        inside = (
+            (xy[..., 0] >= 0)
+            & (xy[..., 0] < img_w)
+            & (xy[..., 1] >= 0)
+            & (xy[..., 1] < img_h)
+        )
+        ridge = np.zeros(inside.shape, dtype=np.float64)
+        if np.any(inside):
+            ridge[inside] = blackhat[xy[..., 1][inside], xy[..., 0][inside]]
+        # The first strongest offset wins, matching the old left-to-right scan.
+        return tip + normal * float(offsets[int(np.argmax(ridge.sum(axis=1)))])
 
     @staticmethod
     def _shaft_ridge_score(
@@ -1340,42 +1369,55 @@ class PenTracker:
         img_h: int,
     ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, np.ndarray]:
         """Score a ray for a thin, locally-dark shaft; skin-coloured pixels score zero."""
-        vals: list[float] = []
-        points: list[np.ndarray] = []
-        values: list[float] = []
-        sats: list[float] = []
+        along = np.arange(1.0, max_dist, step)
+        empty = (
+            np.zeros(0, dtype=np.float64),
+            [],
+            np.zeros(0, dtype=np.float64),
+            np.zeros(0, dtype=np.float64),
+        )
+        if along.size == 0:
+            return empty
+        points = origin + axis * along[:, None]
+        xy = np.rint(points).astype(np.int32)
+        inside = (
+            (xy[:, 0] >= 0) & (xy[:, 0] < img_w) & (xy[:, 1] >= 0) & (xy[:, 1] < img_h)
+        )
+        if not np.all(inside):
+            stop = int(np.argmax(~inside))
+            if stop == 0:
+                return empty
+            points = points[:stop]
+            xy = xy[:stop]
+        brightness = value[xy[:, 1], xy[:, 0]].astype(np.float64, copy=False)
+        saturation = sat[xy[:, 1], xy[:, 0]].astype(np.float64, copy=False)
+        center = score[xy[:, 1], xy[:, 0]].astype(np.float64, copy=False)
         normal = np.array([-axis[1], axis[0]], dtype=np.float64)
-        for along in np.arange(1.0, max_dist, step):
-            point = origin + axis * along
-            x, y = int(round(point[0])), int(round(point[1]))
-            if not (0 <= x < img_w and 0 <= y < img_h):
-                break
-            center = float(score[y, x])
-            saturation = float(sat[y, x])
-            brightness = float(value[y, x])
-            values.append(brightness)
-            sats.append(saturation)
-            points.append(point)
-            if saturation > 95 and brightness > 105:
-                vals.append(0.0)
-                continue
-            side = 0.0
-            samples = 0
-            for offset in (3.0, 5.0):
-                for sign in (-1.0, 1.0):
-                    neighbor = point + normal * sign * offset
-                    nx, ny = int(round(neighbor[0])), int(round(neighbor[1]))
-                    if 0 <= nx < img_w and 0 <= ny < img_h:
-                        side += float(score[ny, nx])
-                        samples += 1
-            side = side / samples if samples else 0.0
-            tip_bonus = 25.0 if brightness < 105 and saturation < 70 else 0.0
-            vals.append(center + 0.8 * max(0.0, center - side) + tip_bonus)
+        pair = (np.array([3.0, 5.0])[:, None] * np.array([-1.0, 1.0])[None, :]).reshape(-1)
+        neighbors = points[:, None, :] + normal * pair.reshape(1, -1, 1)
+        nxy = np.rint(neighbors).astype(np.int32)
+        neighbor_inside = (
+            (nxy[..., 0] >= 0)
+            & (nxy[..., 0] < img_w)
+            & (nxy[..., 1] >= 0)
+            & (nxy[..., 1] < img_h)
+        )
+        gathered = np.zeros(neighbor_inside.shape, dtype=np.float64)
+        if np.any(neighbor_inside):
+            gathered[neighbor_inside] = score[
+                nxy[..., 1][neighbor_inside], nxy[..., 0][neighbor_inside]
+            ]
+        neighbor_count = neighbor_inside.sum(axis=1)
+        side = np.zeros(points.shape[0], dtype=np.float64)
+        np.divide(gathered.sum(axis=1), neighbor_count, out=side, where=neighbor_count > 0)
+        vals = center + 0.8 * np.maximum(0.0, center - side)
+        vals[(brightness < 105) & (saturation < 70)] += 25.0
+        vals[(saturation > 95) & (brightness > 105)] = 0.0
         return (
-            np.asarray(vals, dtype=np.float64),
-            points,
-            np.asarray(values, dtype=np.float64),
-            np.asarray(sats, dtype=np.float64),
+            vals,
+            [points[i] for i in range(points.shape[0])],
+            brightness,
+            saturation,
         )
 
     @staticmethod
