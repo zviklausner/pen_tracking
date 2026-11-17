@@ -142,6 +142,28 @@ def test_detect_without_hand_finds_tip_on_sample_frames(frame_index, expected_ti
     assert pen.grip[1] < pen.tip[1]
 
 
+def test_rectangle_crop_keeps_the_full_frame_detector_scale() -> None:
+    """A shorter crop must not change the downscale or the shaft-fraction height."""
+    tracker = PenTracker()
+    full_h, full_w = 1920, 1080
+    full = np.zeros((full_h, full_w, 3), np.uint8)
+    full_small, full_scale = tracker._prepare_search_image(full, None)
+    assert tracker._fraction_h is None
+    assert full_small.shape[0] == int(round(full_h * full_scale))
+    assert tracker._lim(full_small.shape[0]) == full_small.shape[0]
+
+    crop = np.zeros((480, 360, 3), np.uint8)
+    crop_small, crop_scale = tracker._prepare_search_image(crop, full_h)
+    assert crop_scale == full_scale
+    assert crop_scale == min(1.0, tracker.detection_height / full_h)
+    assert tracker._fraction_h == full_small.shape[0]
+    assert crop_small.shape[0] == int(round(crop.shape[0] * crop_scale))
+    assert crop_small.shape[0] < tracker._fraction_h
+    assert tracker._lim(crop_small.shape[0]) == float(full_small.shape[0])
+    # Shaft limits follow the full detection image, not the crop.
+    assert 0.08 * tracker._lim(crop_small.shape[0]) == 0.08 * full_small.shape[0]
+
+
 def test_pen_tracker_detects_tip_on_sample_frame(hand_landmarks_from_video) -> None:
     frame = _read_frame(40)
     tracker = PenTracker()

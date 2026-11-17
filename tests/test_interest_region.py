@@ -62,6 +62,20 @@ def test_rectangle_crop_keeps_the_pixels() -> None:
     assert int(cropped[0, 0, 0]) == 7
 
 
+def test_semicircle_crop_keeps_the_pen_and_whites_the_box_corner() -> None:
+    frame = np.zeros((80, 80, 3), dtype=np.uint8)
+    # Diameter along y=30, arc downward. The lead sits inside the arc.
+    frame[48, 40] = (4, 5, 6)
+    region = InterestRegion("semicircle", 10, 30, 70, 30)
+    assert region.contains(40, 48)
+    assert not region.contains(12, 55)
+    cropped, origin_x, origin_y = region.crop(frame)
+    inside = cropped[48 - origin_y, 40 - origin_x]
+    outside = cropped[55 - origin_y, 12 - origin_x]
+    assert tuple(int(v) for v in inside) == (4, 5, 6)
+    assert tuple(int(v) for v in outside) == (255, 255, 255)
+
+
 def test_region_rejects_a_tiny_drag() -> None:
     with pytest.raises(ValueError):
         InterestRegion("rectangle", 0, 0, 3, 3)

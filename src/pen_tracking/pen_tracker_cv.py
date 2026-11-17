@@ -73,8 +73,46 @@ class PenTracker:
         self._rejected = 0
         self._history: deque[PenDetectionResult] = deque(maxlen=history_size)
         self._shaft_length_px: float | None = None
+        # Full-frame detection height while a crop is being searched. None keeps
+        # every shaft fraction on the image that was actually passed in.
+        self._fraction_h: int | None = None
 
-    def track(self, frame_bgr, hand_landmarks=None) -> PenDetectionResult | None:
+    def _lim(self, view_h: int) -> float:
+        """Height shaft fractions use. A crop still measures them on the full frame."""
+        if self._fraction_h is None:
+            return float(view_h)
+        return float(self._fraction_h)
+
+    def _prepare_search_image(self, frame_bgr, metric_height: int | None):
+        """Downscale like the full frame, even when ``frame_bgr`` is a crop of it.
+
+        ``metric_height`` is the full frame height in the same pixels as
+        ``frame_bgr``. Shaft limits then stay fractions of that frame, while the
+        array itself is only the crop, resized by the full frame's scale.
+        """
+        height, width = frame_bgr.shape[:2]
+        reference = height if metric_height is None else int(metric_height)
+        scale = min(1.0, self.detection_height / reference) if reference > 0 else 1.0
+        if scale < 1.0:
+            small = cv2.resize(
+                frame_bgr,
+                (int(round(width * scale)), int(round(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+            span = int(round(reference * scale))
+        else:
+            small = frame_bgr
+            span = reference
+        self._fraction_h = None if metric_height is None else span
+        return small, scale
+
+    def track(
+        self,
+        frame_bgr,
+        hand_landmarks=None,
+        *,
+        metric_height: int | None = None,
+    ) -> PenDetectionResult | None:
         """Follow the pen by its appearance; the hand, when given, only says where to look first."""
         hand_hint = None
         fingertip_pixels: list[np.ndarray] = []
@@ -86,8 +124,10 @@ class PenTracker:
                 )
             hand_hint = (fingertip_pixels[0] + fingertip_pixels[1]) / 2.0
 
-        frame_height = frame_bgr.shape[0]
-        raw = self._detect_raw_without_hand(frame_bgr, hand_hint)
+        # Distances below are in the same pixels as the full frame. A crop must
+        # not shrink the grip and jump checks.
+        frame_height = frame_bgr.shape[0] if metric_height is None else int(metric_height)
+        raw = self._detect_raw_without_hand(frame_bgr, hand_hint, metric_height)
         if raw is not None and fingertip_pixels and self._tip_is_on_the_hand(
             raw, fingertip_pixels, frame_height
         ):
@@ -96,7 +136,7 @@ class PenTracker:
         # Silver / metallic pens are too bright for the dark-shaft mask; fall back to a
         # relative-darkness scan guided by the writing grip.
         if raw is None and hand_landmarks is not None:
-            raw = self._detect_relative_shaft(frame_bgr, hand_landmarks)
+            raw = self._detect_relative_shaft(frame_bgr, hand_landmarks, metric_height)
             if raw is not None and fingertip_pixels and self._tip_is_on_the_hand(
                 raw, fingertip_pixels, frame_height
             ):
@@ -348,9 +388,10 @@ class PenTracker:
         appearance_length: float | None = None,
     ) -> np.ndarray:
         """Keep overlay length steady, but never past the visible upper end."""
+        span = self._lim(frame_height)
         length = float(np.linalg.norm(tip - back))
-        min_len = 0.08 * frame_height
-        max_len = 0.28 * frame_height
+        min_len = 0.08 * span
+        max_len = 0.28 * span
         if appearance_length is not None and appearance_length > min_len:
             length = min(length, appearance_length)
         length = float(np.clip(length, min_len, max_len))
@@ -360,15 +401,15 @@ class PenTracker:
             delta = length - self._shaft_length_px
             if delta >= 0:
                 # Reach a newly visible eraser within a frame or two.
-                step = min(delta, 0.06 * frame_height)
+                step = min(delta, 0.06 * span)
             else:
                 # One frame that loses the upper shaft must not collapse the line.
-                step = max(delta, -0.01 * frame_height)
+                step = max(delta, -0.01 * span)
             updated = self._shaft_length_px + step
             if (
                 appearance_length is not None
                 and appearance_length > min_len
-                and appearance_length >= self._shaft_length_px - 0.02 * frame_height
+                and appearance_length >= self._shaft_length_px - 0.02 * span
             ):
                 updated = min(updated, appearance_length)
             self._shaft_length_px = float(np.clip(updated, min_len, max_len))
@@ -384,9 +425,10 @@ class PenTracker:
         """Keep the eraser when one frame's walk stops short on the hand."""
         delta = tip - visible_back
         dist = float(np.linalg.norm(delta))
+        span = self._lim(img_h)
         if (
             self._shaft_length_px is not None
-            and dist < self._shaft_length_px - 0.03 * img_h
+            and dist < self._shaft_length_px - 0.03 * span
             and self._last is not None
         ):
             previous = np.array(self._last.axis, dtype=np.float64)
@@ -400,8 +442,8 @@ class PenTracker:
         )
         return tip, back, axis
 
-    @staticmethod
     def _visible_upper_end(
+        self,
         tip: np.ndarray,
         axis: np.ndarray,
         blackhat: np.ndarray,
@@ -423,7 +465,8 @@ class PenTracker:
             return hint.copy()
         back_axis = direction / norm
         normal = np.array([-back_axis[1], back_axis[0]], dtype=np.float64)
-        grip_along = max(0.02 * img_h, float(np.dot(hint - tip, back_axis)))
+        span = self._lim(img_h)
+        grip_along = max(0.02 * span, float(np.dot(hint - tip, back_axis)))
 
         def sample(along: float, off: float) -> tuple[float, float, np.ndarray] | None:
             point = tip + back_axis * along + normal * off
@@ -438,7 +481,7 @@ class PenTracker:
         last_along = grip_along
         end_off = 0.0
         gaps = 0
-        limit = min(0.34 * img_h, grip_along + 0.18 * img_h)
+        limit = min(0.34 * span, grip_along + 0.18 * span)
         for along in np.arange(4.0, limit, 1.0):
             found_off = None
             center = sample(float(along), 0.0)
@@ -455,7 +498,7 @@ class PenTracker:
                 end_off = found_off
                 gaps = 0
                 continue
-            if along < grip_along + 0.02 * img_h:
+            if along < grip_along + 0.02 * span:
                 continue
             gaps += 1
             if gaps > 5:
@@ -483,10 +526,11 @@ class PenTracker:
         """How far the shaft still looks like a pen when walking tip → upper end."""
         back_axis = -axis
         normal = np.array([-axis[1], axis[0]], dtype=np.float64)
-        grip_along = max(0.02 * img_h, float(np.dot(hint - tip, back_axis)))
-        last_along = grip_along + 0.02 * img_h
+        span = self._lim(img_h)
+        grip_along = max(0.02 * span, float(np.dot(hint - tip, back_axis)))
+        last_along = grip_along + 0.02 * span
         gaps = 0
-        for along in np.arange(1.0, 0.24 * img_h, 1.0):
+        for along in np.arange(1.0, 0.24 * span, 1.0):
             point = tip + back_axis * along
             x, y = int(round(point[0])), int(round(point[1]))
             if not (0 <= x < img_w and 0 <= y < img_h):
@@ -512,7 +556,7 @@ class PenTracker:
                 or (thin > 2.5 and bh >= 5 and saturation < 85)
             )
             is_skin = saturation > 95 and brightness > 100
-            if along < grip_along + 0.02 * img_h:
+            if along < grip_along + 0.02 * span:
                 if is_pen or is_skin:
                     last_along = along
                 continue
@@ -533,7 +577,7 @@ class PenTracker:
             if gaps > 1:
                 break
         # Stop at the visible eraser, which sits well above the fingers.
-        return float(min(last_along, grip_along + 0.20 * img_h))
+        return float(min(last_along, grip_along + 0.20 * span))
 
     def _hand_geometry(
         self,
@@ -681,17 +725,9 @@ class PenTracker:
         self,
         frame_bgr,
         hand_hint: np.ndarray | None = None,
+        metric_height: int | None = None,
     ) -> PenDetectionResult | None:
-        height, width = frame_bgr.shape[:2]
-        scale = min(1.0, self.detection_height / height)
-        if scale < 1.0:
-            small = cv2.resize(
-                frame_bgr,
-                (int(round(width * scale)), int(round(height * scale))),
-                interpolation=cv2.INTER_AREA,
-            )
-        else:
-            small = frame_bgr
+        small, scale = self._prepare_search_image(frame_bgr, metric_height)
         hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
 
         segments = self._find_shaft_segments(hsv)
@@ -702,7 +738,7 @@ class PenTracker:
         if self._last is not None and not self._last.from_hand:
             previous_tip = np.array(self._last.tip) * scale
         hint = hand_hint * scale if hand_hint is not None else None
-        best = self._pick_shaft(segments, previous_tip, hint, hsv.shape[0])
+        best = self._pick_shaft(segments, previous_tip, hint, int(self._lim(hsv.shape[0])))
         if best is None:
             return None
         shaft = self._merge_collinear(best, segments)
@@ -731,19 +767,16 @@ class PenTracker:
             from_hand=False,
         )
 
-    def _detect_relative_shaft(self, frame_bgr, hand_landmarks) -> PenDetectionResult | None:
+    def _detect_relative_shaft(
+        self,
+        frame_bgr,
+        hand_landmarks,
+        metric_height: int | None = None,
+    ) -> PenDetectionResult | None:
         """Find a bright metallic pen from its edges/shaft, not from millimetre priors."""
-        height, width = frame_bgr.shape[:2]
-        scale = min(1.0, self.detection_height / height)
-        if scale < 1.0:
-            small = cv2.resize(
-                frame_bgr,
-                (int(round(width * scale)), int(round(height * scale))),
-                interpolation=cv2.INTER_AREA,
-            )
-        else:
-            small = frame_bgr
+        small, scale = self._prepare_search_image(frame_bgr, metric_height)
         img_h, img_w = small.shape[:2]
+        span = self._lim(img_h)
 
         points = np.array(
             [[landmark.x * img_w, landmark.y * img_h] for landmark in hand_landmarks],
@@ -817,7 +850,7 @@ class PenTracker:
                 tip, axis0, blackhat, value, sat, img_w, img_h, hint
             )
             grip_along = float(np.dot(hint - tip, -axis0))
-            soft_cap = grip_along + 0.20 * img_h
+            soft_cap = grip_along + 0.20 * span
             if upper is not None:
                 upper_along = float(np.dot(upper - tip, -axis0))
                 upper_lat = abs(
@@ -827,8 +860,8 @@ class PenTracker:
                 )
                 # Trust upper only when it sits on this axis and isn't absurdly long.
                 if (
-                    upper_lat <= 0.025 * img_h
-                    and grip_along < upper_along <= grip_along + 0.20 * img_h
+                    upper_lat <= 0.025 * span
+                    and grip_along < upper_along <= grip_along + 0.20 * span
                 ):
                     appear_len = max(appear_len, upper_along)
                     soft_cap = max(soft_cap, upper_along)
@@ -836,11 +869,11 @@ class PenTracker:
             ridge = self._shaft_ridge_score(tip, axis0, blackhat, appear_len, img_w, img_h)
             quality = (
                 float(np.dot(axis0, finger)) * 1.5
-                + appear_len / max(img_h, 1.0)
+                + appear_len / max(span, 1.0)
                 + ridge * 0.02
             )
             if prev_tip is not None:
-                quality -= float(np.linalg.norm(tip - prev_tip)) / max(img_h, 1.0)
+                quality -= float(np.linalg.norm(tip - prev_tip)) / max(span, 1.0)
             if best is None or quality > best[0]:
                 best = (quality, tip, axis0, appear_len)
         if best is None:
@@ -860,8 +893,8 @@ class PenTracker:
             from_hand=False,
         )
 
-    @staticmethod
     def _relative_shaft_geometry_ok(
+        self,
         tip: np.ndarray,
         axis: np.ndarray,
         hint: np.ndarray,
@@ -869,18 +902,19 @@ class PenTracker:
         img_h: int,
     ) -> bool:
         """Reject shafts that leave the finger corridor (vertical / sideways escapes)."""
+        span = self._lim(img_h)
         tip_along = float(np.dot(tip - hint, axis))
-        if tip_along < 0.025 * img_h or tip_along > 0.22 * img_h:
+        if tip_along < 0.025 * span or tip_along > 0.22 * span:
             return False
         if float(np.dot(axis, finger)) < 0.45:
             return False
         finger_n = np.array([-finger[1], finger[0]], dtype=np.float64)
-        if abs(float(np.dot(tip - hint, finger_n))) > 0.06 * img_h:
+        if abs(float(np.dot(tip - hint, finger_n))) > 0.06 * span:
             return False
         return True
 
-    @staticmethod
     def _find_upper_shaft_point(
+        self,
         hint: np.ndarray,
         finger: np.ndarray,
         blackhat: np.ndarray,
@@ -896,8 +930,9 @@ class PenTracker:
         angles = base_ang + np.radians(degrees)
         back = np.stack((np.cos(angles), np.sin(angles)), axis=1)
         normal = np.stack((-back[:, 1], back[:, 0]), axis=1)
-        offsets = np.arange(-0.02 * img_h, 0.02 * img_h + 0.1, 1.5)
-        along = np.arange(0.045 * img_h, 0.14 * img_h, 2.0)
+        span = self._lim(img_h)
+        offsets = np.arange(-0.02 * span, 0.02 * span + 0.1, 1.5)
+        along = np.arange(0.045 * span, 0.14 * span, 2.0)
         points = (
             hint
             + back[:, None, None, :] * along[None, None, :, None]
@@ -956,7 +991,7 @@ class PenTracker:
         align = np.maximum(0.0, (-back) @ finger)
         scores = contribution.sum(axis=-1)
         scores *= 0.45 + 0.55 * align[:, None]
-        scores *= 1.0 / (1.0 + np.abs(offsets) / (0.025 * img_h))
+        scores *= 1.0 / (1.0 + np.abs(offsets) / (0.025 * span))
         scores = np.where(kept_count >= 3, scores, -1.0)
         if float(scores.max()) < 0.0:
             return None
@@ -966,8 +1001,8 @@ class PenTracker:
         middle = kept_steps[len(kept_steps) // 2]
         return points[chosen_angle, chosen_offset, middle].copy()
 
-    @staticmethod
     def _tip_from_upper_shaft(
+        self,
         upper: np.ndarray,
         finger: np.ndarray,
         hint: np.ndarray,
@@ -993,7 +1028,8 @@ class PenTracker:
             if float(np.dot(axis, finger)) < 0.25:
                 continue
             grip_along = float(np.dot(hint - upper, axis))
-            if grip_along < 0.01 * img_h:
+            span = self._lim(img_h)
+            if grip_along < 0.01 * span:
                 continue
             # Ridge support between upper and the grip.
             support = 0.0
@@ -1010,7 +1046,7 @@ class PenTracker:
             tip = None
             darkest = 1e9
             # Skip the finger zone; lock onto the dark tip past the grip.
-            for along in np.arange(grip_along + 0.045 * img_h, grip_along + 0.22 * img_h, 1.0):
+            for along in np.arange(grip_along + 0.045 * span, grip_along + 0.22 * span, 1.0):
                 point = upper + axis * along
                 x, y = int(round(point[0])), int(round(point[1]))
                 if not (0 <= x < img_w and 0 <= y < img_h):
@@ -1028,7 +1064,7 @@ class PenTracker:
             if tip is None:
                 continue
             tip_along = float(np.dot(tip - hint, axis))
-            if tip_along < 0.035 * img_h:
+            if tip_along < 0.035 * span:
                 continue
             grip_lat = abs(
                 float(axis[0] * (hint[1] - tip[1]) - axis[1] * (hint[0] - tip[0]))
@@ -1038,7 +1074,7 @@ class PenTracker:
                 + (135.0 - darkest) * 0.35
                 - grip_lat * 0.35
                 + float(np.dot(axis, finger)) * 12.0
-                + tip_along / max(img_h, 1.0) * 30.0
+                + tip_along / max(span, 1.0) * 30.0
             )
             if best is None or quality > best[0]:
                 best = (quality, tip, axis)
@@ -1046,8 +1082,8 @@ class PenTracker:
             return None, None
         return best[1], best[2]
 
-    @staticmethod
     def _lateral_snap_whole_shaft(
+        self,
         tip: np.ndarray,
         axis: np.ndarray,
         blackhat: np.ndarray,
@@ -1058,8 +1094,9 @@ class PenTracker:
         """Translate the shaft sideways onto the strongest ridge (keeps angle)."""
         normal = np.array([-axis[1], axis[0]], dtype=np.float64)
         grip_along = max(8.0, float(np.dot(hint - tip, -axis)))
-        offsets = np.arange(-0.055 * img_h, 0.055 * img_h + 0.1, 1.0)
-        along = np.arange(4.0, grip_along + 0.07 * img_h, 2.0)
+        span = self._lim(img_h)
+        offsets = np.arange(-0.055 * span, 0.055 * span + 0.1, 1.0)
+        along = np.arange(4.0, grip_along + 0.07 * span, 2.0)
         if offsets.size == 0:
             return tip
         samples = tip + normal * offsets[:, None, None] - axis * along[None, :, None]
@@ -1125,8 +1162,8 @@ class PenTracker:
             return False
         return True
 
-    @staticmethod
     def _tip_has_shaft_support(
+        self,
         tip: np.ndarray,
         axis: np.ndarray,
         blackhat: np.ndarray,
@@ -1136,7 +1173,7 @@ class PenTracker:
     ) -> bool:
         """True when a black-hat ridge continues from the tip toward the grip."""
         grip_along = float(np.dot(hint - tip, -axis))
-        if grip_along < 0.02 * img_h:
+        if grip_along < 0.02 * self._lim(img_h):
             return False
         hits = 0
         samples = 0
@@ -1163,10 +1200,11 @@ class PenTracker:
         prev_tip: np.ndarray | None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         """Recover tip/back from parallel pen edges near the grip."""
-        x0 = int(max(0, hint[0] - 0.15 * img_h))
-        x1 = int(min(img_w, hint[0] + 0.15 * img_h))
-        y0 = int(max(0, hint[1] - 0.32 * img_h))
-        y1 = int(min(img_h, hint[1] + 0.28 * img_h))
+        span = self._lim(img_h)
+        x0 = int(max(0, hint[0] - 0.15 * span))
+        x1 = int(min(img_w, hint[0] + 0.15 * span))
+        y0 = int(max(0, hint[1] - 0.32 * span))
+        y1 = int(min(img_h, hint[1] + 0.28 * span))
         roi = gray[y0:y1, x0:x1]
         if roi.size == 0:
             return None
@@ -1177,7 +1215,7 @@ class PenTracker:
             1,
             np.pi / 180,
             16,
-            minLineLength=int(0.09 * img_h),
+            minLineLength=int(0.09 * span),
             maxLineGap=16,
         )
         if lines is None:
@@ -1200,7 +1238,7 @@ class PenTracker:
                 continue
             proj = float(np.clip(np.dot(hint - p1, direction), 0.0, length))
             dist = float(np.linalg.norm(hint - (p1 + direction * proj)))
-            if dist > 0.038 * img_h:
+            if dist > 0.038 * span:
                 continue
             candidates.append((length, dist, align, p1, p2, direction))
         if not candidates:
@@ -1220,7 +1258,7 @@ class PenTracker:
             offset = abs(
                 float(base[5][0] * (mid[1] - base[3][1]) - base[5][1] * (mid[0] - base[3][0]))
             )
-            if offset > 0.035 * img_h:
+            if offset > 0.035 * span:
                 continue
             points.extend([cand[3], cand[4]])
 
@@ -1253,7 +1291,7 @@ class PenTracker:
             axis = -axis
         if prev_tip is not None and np.linalg.norm(tip - prev_tip) > np.linalg.norm(
             back - prev_tip
-        ) + 0.04 * img_h:
+        ) + 0.04 * span:
             # Only flip for continuity when the other end is also past the fingers.
             if float(np.dot(back - hint, finger)) > float(np.dot(tip - hint, finger)):
                 tip, back = back, tip
@@ -1266,13 +1304,13 @@ class PenTracker:
             return None
         if float(value[ty, tx]) > 135 and float(sat[ty, tx]) < 55:
             return None
-        if float(np.dot(tip - hint, axis)) < 0.02 * img_h:
+        if float(np.dot(tip - hint, axis)) < 0.02 * span:
             return None
         # Keep back at least slightly past the grip; appearance clamp shortens later.
         grip_along = float(np.dot(hint - tip, -axis))
         back_along = float(np.dot(back - tip, -axis))
-        if back_along < grip_along + 0.03 * img_h:
-            back = tip - axis * (grip_along + 0.06 * img_h)
+        if back_along < grip_along + 0.03 * span:
+            back = tip - axis * (grip_along + 0.06 * span)
         return tip, back, axis
 
     def _detect_relative_shaft_rays(
@@ -1314,7 +1352,7 @@ class PenTracker:
             if float(np.dot(axis, finger)) < 0.45:
                 continue
             tip_vals, tip_pts, tip_value, tip_sat = self._sample_shaft_ray(
-                hint, axis, 0.30 * img_h, 1.0, score, sat, value, img_w, img_h
+                hint, axis, 0.30 * self._lim(img_h), 1.0, score, sat, value, img_w, img_h
             )
             if len(tip_vals) < 12:
                 continue
@@ -1331,7 +1369,7 @@ class PenTracker:
                 continue
             if float(value[ty, tx]) > 130:
                 continue
-            if float(np.dot(tip - hint, axis)) < 0.028 * img_h:
+            if float(np.dot(tip - hint, axis)) < 0.028 * self._lim(img_h):
                 continue
             back = self._walk_shaft_from_tip(
                 tip, axis, hint, score, sat, value, img_w, img_h
@@ -1571,13 +1609,14 @@ class PenTracker:
         not depend on ball/pen millimetre priors.
         """
         back_axis = -tip_axis
-        grip_along = max(0.02 * img_h, float(np.dot(hint - tip, back_axis)))
+        span = self._lim(img_h)
+        grip_along = max(0.02 * span, float(np.dot(hint - tip, back_axis)))
         # Default: cover tip→grip plus a shaft stub above the fingers.
-        target = grip_along + 0.11 * img_h
-        target = min(target, 0.26 * img_h)
+        target = grip_along + 0.11 * span
+        target = min(target, 0.26 * span)
         # Nudge to the furthest still-pen-like point near that target.
         best = tip + back_axis * target
-        for along in np.arange(grip_along + 0.04 * img_h, target + 0.04 * img_h, 1.0):
+        for along in np.arange(grip_along + 0.04 * span, target + 0.04 * span, 1.0):
             point = tip + back_axis * along
             x, y = int(round(point[0])), int(round(point[1]))
             if not (0 <= x < img_w and 0 <= y < img_h):
@@ -1595,12 +1634,13 @@ class PenTracker:
 
     def _find_shaft_segments(self, hsv: np.ndarray) -> list[_ShaftSegment]:
         img_h = hsv.shape[0]
+        span = self._lim(img_h)
         value = hsv[..., 2]
         dark = (value < self.shaft_max_value).astype(np.uint8) * 255
         dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
-        min_length = 0.05 * img_h
-        max_thickness = 0.04 * img_h
+        min_length = 0.05 * span
+        max_thickness = 0.04 * span
         ring_kernel = np.ones((7, 7), np.uint8)
 
         contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)

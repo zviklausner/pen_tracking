@@ -162,13 +162,19 @@ def process_video(
 
                 pen_detection = None
                 if pen_tracker is not None:
+                    # Shaft lengths stay fractions of the full frame, not the crop.
+                    metric_height = None if config.region is None else frame.shape[0]
                     if detected_hands.hand_landmarks:
                         pen_detection = pen_tracker.track(
                             search,
                             detected_hands.hand_landmarks[0],
+                            metric_height=metric_height,
                         )
                     elif config.track_pen_without_hand or not config.track_hand:
-                        pen_detection = pen_tracker.track(search)
+                        pen_detection = pen_tracker.track(
+                            search,
+                            metric_height=metric_height,
+                        )
                     else:
                         pen_tracker.reset()
                     pen_detection = _shift_pen(pen_detection, origin_x, origin_y)
