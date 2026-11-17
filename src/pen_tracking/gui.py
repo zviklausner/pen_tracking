@@ -7,6 +7,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -15,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 
 from pen_tracking.browse_dialog import list_roots
+from pen_tracking.interest_region import InterestRegion, RegionShape, read_first_frame
 from pen_tracking.config import (
     DEFAULT_OVERLAY_COLOR,
     OVERLAY_COLORS_BGR,
@@ -71,6 +73,24 @@ def suggest_output_path(video_path: Path, stride: int) -> Path:
     return DEFAULT_PROCESSED_DIR / f"{video_path.stem}_tracked_every{stride}.mp4"
 
 
+def preview_fit_scale(
+    frame_height: int,
+    frame_width: int,
+    screen_height: int,
+    screen_width: int,
+) -> float:
+    """Scale the draw preview so the hint and the confirm buttons stay on screen."""
+    reserved_height = 340
+    reserved_width = 48
+    max_height = max(220, screen_height - reserved_height)
+    max_width = max(220, screen_width - reserved_width)
+    return min(
+        1.0,
+        max_height / max(frame_height, 1),
+        max_width / max(frame_width, 1),
+    )
+
+
 MODE_LABELS: dict[str, TrackMode] = {
     "Both hand and pen": "both",
     "Hand only": "hand",
@@ -90,6 +110,14 @@ LINE_COLOR_LABELS: dict[str, OverlayColorName] = {
     "Red": "red",
 }
 LINE_COLOR_LABEL_BY_VALUE = {value: label for label, value in LINE_COLOR_LABELS.items()}
+REGION_LABELS: dict[str, RegionShape | None] = {
+    "Whole frame": None,
+    "Rectangle": "rectangle",
+    "Square": "square",
+    "Ellipse": "ellipse",
+    "Circle": "circle",
+    "Semicircle": "semicircle",
+}
 
 
 def build_config(
@@ -103,6 +131,7 @@ def build_config(
     path_color: OverlayColorName = DEFAULT_OVERLAY_COLOR,
     tip_color: OverlayColorName = DEFAULT_OVERLAY_COLOR,
     open_output_when_done: bool = False,
+    region: InterestRegion | None = None,
 ) -> TrackerConfig:
     if not MIN_STRIDE <= stride <= MAX_STRIDE:
         raise ValueError(f"Frame stride must be between {MIN_STRIDE} and {MAX_STRIDE}")
@@ -130,6 +159,7 @@ def build_config(
         tip_color=tip_color,
         open_output_when_done=open_output_when_done,
         display=False,
+        region=region,
     )
 
 
@@ -154,6 +184,171 @@ def open_path(path: Path) -> None:
 
 def open_folder(path: Path) -> None:
     open_path(path)
+
+
+class RegionDrawDialog(tk.Toplevel):
+    """Drag a shape on the first video frame."""
+
+    def __init__(self, parent: tk.Misc, frame_bgr, shape: RegionShape) -> None:
+        super().__init__(parent)
+        self.title("Draw the region")
+        self.resizable(False, False)
+        self.result: InterestRegion | None = None
+        self._shape = shape
+        self._start: tuple[float, float] | None = None
+        self._current: tuple[float, float] | None = None
+        height, width = frame_bgr.shape[:2]
+        self._scale = preview_fit_scale(
+            height, width, self.winfo_screenheight(), self.winfo_screenwidth()
+        )
+        preview_size = (
+            max(1, int(round(width * self._scale))),
+            max(1, int(round(height * self._scale))),
+        )
+        preview = cv2.resize(frame_bgr, preview_size, interpolation=cv2.INTER_AREA)
+        self._preview_path = Path(tempfile.gettempdir()) / "ainav_region_preview.png"
+        cv2.imwrite(str(self._preview_path), preview)
+        self._photo = tk.PhotoImage(file=str(self._preview_path))
+
+        hint = "Drag on the picture, then click Use this region. Enter confirms."
+        if shape == "semicircle":
+            hint = (
+                "Drag the straight edge. The arc sits to the right of that drag. "
+                "Enter confirms."
+            )
+        elif shape in ("square", "circle"):
+            hint = "Drag. The shape stays as wide as it is tall. Enter confirms."
+        ttk.Label(self, text=hint, wraplength=max(280, preview_size[0])).pack(
+            anchor="w", padx=8, pady=(8, 0)
+        )
+
+        self._canvas = tk.Canvas(
+            self,
+            width=preview_size[0],
+            height=preview_size[1],
+            highlightthickness=0,
+        )
+        self._canvas.pack(padx=8, pady=8)
+        self._canvas.create_image(0, 0, image=self._photo, anchor="nw")
+        self._canvas.bind("<ButtonPress-1>", self._on_press)
+        self._canvas.bind("<B1-Motion>", self._on_drag)
+        self._canvas.bind("<ButtonRelease-1>", self._on_release)
+
+        self._warning = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self._warning, foreground="#a32020").pack(
+            anchor="w", padx=8
+        )
+
+        buttons = ttk.Frame(self)
+        buttons.pack(anchor="e", padx=8, pady=(0, 8))
+        button_row = []
+        if shape == "semicircle":
+            button_row.append(ttk.Button(buttons, text="Flip arc", command=self._flip))
+        button_row.append(ttk.Button(buttons, text="Cancel", command=self._cancel))
+        button_row.append(ttk.Button(buttons, text="Use this region", command=self._confirm))
+        for button in button_row:
+            button.pack(side="left", padx=4)
+            button.bind("<Return>", self._on_key_confirm)
+            button.bind("<Escape>", self._on_key_cancel)
+        self.bind("<Return>", self._on_key_confirm)
+        self.bind("<Escape>", self._on_key_cancel)
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.update_idletasks()
+        self._place_on_screen()
+        self.lift()
+        self.focus_force()
+        self.grab_set()
+
+    def _place_on_screen(self) -> None:
+        width = self.winfo_reqwidth()
+        height = self.winfo_reqheight()
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        x = max(0, (screen_w - width) // 2)
+        if height > screen_h - 80:
+            y = 4
+        else:
+            y = max(0, (screen_h - height) // 2)
+        self.geometry(f"+{x}+{y}")
+
+    def _on_key_confirm(self, _event=None):
+        self._confirm()
+        return "break"
+
+    def _on_key_cancel(self, _event=None):
+        self._cancel()
+        return "break"
+
+    def _frame_point(self, event) -> tuple[float, float]:
+        return event.x / self._scale, event.y / self._scale
+
+    def _on_press(self, event) -> None:
+        self._start = self._frame_point(event)
+        self._current = self._start
+
+    def _on_drag(self, event) -> None:
+        if self._start is None:
+            return
+        self._current = self._frame_point(event)
+        self._redraw()
+
+    def _on_release(self, event) -> None:
+        if self._start is None:
+            return
+        self._current = self._frame_point(event)
+        self._redraw()
+
+    def _region_or_none(self) -> InterestRegion | None:
+        if self._start is None or self._current is None:
+            return None
+        try:
+            return InterestRegion.from_drag(self._shape, *self._start, *self._current)
+        except ValueError:
+            return None
+
+    def _redraw(self) -> None:
+        self._canvas.delete("region")
+        region = self._region_or_none()
+        if region is None:
+            return
+        points = region.outline()
+        flat: list[float] = []
+        for x, y in points:
+            flat.extend((float(x) * self._scale, float(y) * self._scale))
+        self._canvas.create_line(*flat, fill="#ffe14a", width=2, tags="region")
+
+    def _flip(self) -> None:
+        if self._start is None or self._current is None:
+            return
+        self._start, self._current = self._current, self._start
+        self._redraw()
+
+    def _confirm(self) -> None:
+        if not self.winfo_exists():
+            return
+        region = self._region_or_none()
+        if region is None:
+            self._warning.set("Drag a larger shape on the picture first.")
+            try:
+                self.grab_release()
+            except tk.TclError:
+                pass
+            messagebox.showwarning(
+                "AInav", "Drag a larger shape on the picture first.", parent=self
+            )
+            if self.winfo_exists():
+                self.lift()
+                self.grab_set()
+            return
+        self.result = region
+        self.destroy()
+
+    def _cancel(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.result = None
+        self.destroy()
 
 
 def set_windows_app_id() -> None:
@@ -200,6 +395,11 @@ class PenTrackerApp:
         self.tip_color_var = tk.StringVar(
             value=LINE_COLOR_LABEL_BY_VALUE[DEFAULT_OVERLAY_COLOR]
         )
+        self.region_var = tk.StringVar(value="Whole frame")
+        self.region_detail_var = tk.StringVar(value="Whole frame")
+        self._region: InterestRegion | None = None
+        self._region_video: str | None = None
+        self._region_dialog_open = False
         ensure_media_dirs()
         self.open_when_done_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(
@@ -278,9 +478,30 @@ class PenTrackerApp:
             row=5, column=1, sticky="w", padx=6
         )
 
-        ttk.Label(frame, text="Track:").grid(row=6, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Region:").grid(row=6, column=0, sticky="w", pady=4)
+        region_row = ttk.Frame(frame)
+        region_row.grid(row=6, column=1, sticky="w", padx=6)
+        self.region_box = ttk.Combobox(
+            region_row,
+            textvariable=self.region_var,
+            values=list(REGION_LABELS),
+            state="readonly",
+            width=14,
+        )
+        self.region_box.pack(side="left")
+        self.region_box.bind("<<ComboboxSelected>>", lambda _event: self._on_region_shape())
+        self.draw_region_button = ttk.Button(
+            region_row, text="Draw...", command=self._draw_region, state="disabled"
+        )
+        self.draw_region_button.pack(side="left", padx=(8, 0))
+        self.region_detail_label = ttk.Label(
+            region_row, textvariable=self.region_detail_var, foreground="gray"
+        )
+        self.region_detail_label.pack(side="left", padx=(8, 0))
+
+        ttk.Label(frame, text="Track:").grid(row=7, column=0, sticky="w", pady=4)
         mode_row = ttk.Frame(frame)
-        mode_row.grid(row=6, column=1, sticky="w", padx=6)
+        mode_row.grid(row=7, column=1, sticky="w", padx=6)
         self.mode_buttons: list[ttk.Radiobutton] = []
         for label in MODE_LABELS:
             button = ttk.Radiobutton(
@@ -298,32 +519,32 @@ class PenTrackerApp:
             text="Follow the pen when no hand is visible",
             variable=self.pen_without_hand_var,
         )
-        self.pen_without_hand_check.grid(row=7, column=1, sticky="w", padx=6, pady=(4, 0))
+        self.pen_without_hand_check.grid(row=8, column=1, sticky="w", padx=6, pady=(4, 0))
 
         self.line_color_box = self._add_color_picker(
-            frame, 8, "Pen line:", self.line_color_var
+            frame, 9, "Pen line:", self.line_color_var
         )
         self.trail_color_box = self._add_color_picker(
-            frame, 9, "Trail line:", self.trail_color_var
+            frame, 10, "Trail line:", self.trail_color_var
         )
-        self.tip_color_box = self._add_color_picker(frame, 10, "Tip:", self.tip_color_var)
+        self.tip_color_box = self._add_color_picker(frame, 11, "Tip:", self.tip_color_var)
 
         self.open_when_done_check = ttk.Checkbutton(
             frame,
             text="Open the output video automatically when done",
             variable=self.open_when_done_var,
         )
-        self.open_when_done_check.grid(row=11, column=1, sticky="w", padx=6, pady=(4, 0))
+        self.open_when_done_check.grid(row=12, column=1, sticky="w", padx=6, pady=(4, 0))
 
         self.progress_bar = ttk.Progressbar(frame, mode="determinate", maximum=100)
-        self.progress_bar.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        self.progress_bar.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(12, 4))
 
         ttk.Label(frame, textvariable=self.status_var, wraplength=520).grid(
-            row=13, column=0, columnspan=3, sticky="w"
+            row=14, column=0, columnspan=3, sticky="w"
         )
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=14, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        buttons.grid(row=15, column=0, columnspan=3, sticky="e", pady=(12, 0))
         self._on_mode_changed()
         self.open_folder_button = ttk.Button(
             buttons, text="Open output folder", command=self._open_output_folder, state="disabled"
@@ -443,7 +664,72 @@ class PenTrackerApp:
         if folder:
             self._remember_folder(Path(folder))
 
+    def _same_region_video(self, video_path: Path) -> bool:
+        if not self._region_video:
+            return False
+        try:
+            return Path(self._region_video).resolve() == video_path.resolve()
+        except OSError:
+            return self._region_video == str(video_path)
+
+    def _draw_region_state(self, running: bool) -> str:
+        shape = REGION_LABELS.get(self.region_var.get())
+        if running or shape is None or not self.video_var.get().strip():
+            return "disabled"
+        return "normal"
+
+    def _clear_region(self) -> None:
+        self._region = None
+        self._region_video = None
+        self._update_region_detail()
+        if hasattr(self, "draw_region_button"):
+            self.draw_region_button.configure(state=self._draw_region_state(False))
+
+    def _update_region_detail(self) -> None:
+        if self._region is None:
+            if hasattr(self, "region_detail_label"):
+                self.region_detail_label.configure(foreground="gray")
+            if REGION_LABELS.get(self.region_var.get()) is None:
+                self.region_detail_var.set("Whole frame")
+            else:
+                self.region_detail_var.set("Draw the shape on the first frame")
+            return
+        if hasattr(self, "region_detail_label"):
+            self.region_detail_label.configure(foreground="black")
+        self.region_detail_var.set(f"{self.region_var.get()} saved. Click Run.")
+
+    def _on_region_shape(self) -> None:
+        self._clear_region()
+
+    def _draw_region(self) -> None:
+        shape = REGION_LABELS.get(self.region_var.get())
+        if shape is None:
+            return
+        video = self.video_var.get().strip().strip('"')
+        if not video or not Path(video).is_file():
+            messagebox.showwarning("AInav", "Choose an input video first.")
+            return
+        frame = read_first_frame(video)
+        if frame is None:
+            messagebox.showwarning("AInav", "Could not read a frame from that video.")
+            return
+        self._region_dialog_open = True
+        try:
+            dialog = RegionDrawDialog(self.root, frame, shape)
+            self.root.wait_window(dialog)
+        finally:
+            self._region_dialog_open = False
+        if dialog.result is not None:
+            self._region = dialog.result
+            self._region_video = str(Path(video).resolve())
+            self._update_region_detail()
+            self.status_var.set(
+                f"{self.region_var.get()} saved. Click Run to track inside it."
+            )
+
     def _on_video_path_edited(self) -> None:
+        if self._region_dialog_open:
+            return
         text = self.video_var.get().strip().strip('"')
         if not text:
             return
@@ -452,6 +738,8 @@ class PenTrackerApp:
             return
         self.video_var.set(str(video_path))
         self._remember_folder(video_path.parent)
+        if self._region is not None and not self._same_region_video(video_path):
+            self._clear_region()
         self._video_fps = read_video_fps(video_path)
         if not self._output_user_chosen:
             self.output_var.set(str(suggest_output_path(video_path, self.stride)))
@@ -471,6 +759,7 @@ class PenTrackerApp:
         video_path = Path(filename)
         self._remember_folder(video_path.parent)
         self.video_var.set(str(video_path))
+        self._clear_region()
         self._video_fps = read_video_fps(video_path)
         if not self._output_user_chosen:
             self.output_var.set(str(suggest_output_path(video_path, self.stride)))
@@ -534,6 +823,8 @@ class PenTrackerApp:
         self.line_color_box.configure(state="disabled" if running else "readonly")
         self.trail_color_box.configure(state="disabled" if running else "readonly")
         self.tip_color_box.configure(state="disabled" if running else "readonly")
+        self.region_box.configure(state="disabled" if running else "readonly")
+        self.draw_region_button.configure(state=self._draw_region_state(running))
         self.open_when_done_check.configure(state=idle_state)
         for button in self.mode_buttons:
             button.configure(state=idle_state)
@@ -550,6 +841,11 @@ class PenTrackerApp:
         if not self.output_var.get():
             messagebox.showwarning("AInav", "Please choose an output file.")
             return
+        if REGION_LABELS.get(self.region_var.get()) is not None and self._region is None:
+            messagebox.showwarning(
+                "AInav", "Draw the region on the first frame, or choose Whole frame."
+            )
+            return
 
         try:
             config = build_config(
@@ -562,6 +858,7 @@ class PenTrackerApp:
                 path_color=self.path_color,
                 tip_color=self.tip_color,
                 open_output_when_done=self.open_when_done_var.get(),
+                region=self._region,
             )
         except ValueError as exc:
             messagebox.showerror("AInav", str(exc))

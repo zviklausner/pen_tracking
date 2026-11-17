@@ -7,6 +7,7 @@ import pytest
 from pen_tracking.gui import (
     STRIDE_OPTIONS,
     build_config,
+    preview_fit_scale,
     stride_label,
     suggest_output_path,
 )
@@ -30,6 +31,12 @@ def test_stride_options_cover_one_to_ten() -> None:
 def test_stride_label(stride: int, label: str) -> None:
     assert stride_label(stride) == label
     assert STRIDE_OPTIONS[label] == stride
+
+
+def test_preview_fits_a_tall_frame_above_the_confirm_buttons() -> None:
+    scale = preview_fit_scale(1920, 1080, 800, 1400)
+    assert scale < 1.0
+    assert 1920 * scale <= 800 - 340 + 1
 
 
 def test_suggest_output_path_uses_the_processed_folder() -> None:

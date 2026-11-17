@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from pen_tracking.interest_region import InterestRegion
 from pen_tracking.paths import DEFAULT_MODEL, DEFAULT_OUTPUT_DIR, DEFAULT_VIDEO
 
 TrackMode = Literal["both", "hand", "pen"]
@@ -51,6 +52,7 @@ class TrackerConfig:
     open_output_when_done: bool = False
     display: bool = False
     quit_key: str = "q"
+    region: InterestRegion | None = None
 
     @property
     def track_hand(self) -> bool:

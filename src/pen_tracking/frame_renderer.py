@@ -9,6 +9,7 @@ import numpy as np
 from mediapipe.tasks.python.vision import HandLandmarksConnections
 
 from pen_tracking.config import DEFAULT_OVERLAY_COLOR, DEFAULT_OVERLAY_THICKNESS, OVERLAY_COLORS_BGR
+from pen_tracking.interest_region import InterestRegion
 from pen_tracking.tracking_result import FrameTrackingResult
 
 TITLE_BOTH = "AInav Core - Hand + Pen Tracking"
@@ -169,6 +170,15 @@ def _draw_top_right_badge(frame, lines: list[str]) -> None:
         y += text_h + line_gap
 
 
+def _draw_interest_region(frame, region: InterestRegion) -> None:
+    """Thin cyan outline so the chosen search area is visible on the output."""
+    points = np.rint(region.outline()).astype(np.int32)
+    if len(points) < 2:
+        return
+    cv2.polylines(frame, [points], False, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.polylines(frame, [points], False, (255, 255, 0), 2, cv2.LINE_AA)
+
+
 def _draw_frame_badge(frame, frame_index: int) -> None:
     """Draw frame index in the top-right corner."""
     _draw_top_right_badge(frame, [f"FRAME {frame_index}"])
@@ -188,6 +198,7 @@ def render_frame(
     tip_color: tuple[int, int, int] | str | None = None,
     overlay_thickness: int = DEFAULT_OVERLAY_THICKNESS,
     frame_index: int | None = None,
+    region: InterestRegion | None = None,
 ) -> None:
     """Annotate a BGR frame in place with hand and/or pen tracking overlays."""
     color = _overlay_bgr(overlay_color)
@@ -211,6 +222,8 @@ def render_frame(
     )
     if frame_index is not None:
         _draw_frame_badge(frame, frame_index)
+    if region is not None:
+        _draw_interest_region(frame, region)
 
     show_hand = draw_hand and tracking.has_hand
     show_pen = draw_pen and tracking.has_pen

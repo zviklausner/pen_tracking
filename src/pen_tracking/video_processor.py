@@ -13,13 +13,69 @@ import cv2
 from pen_tracking.config import TrackerConfig
 from pen_tracking.frame_renderer import PenPath, render_frame
 from pen_tracking.hand_tracker import HandDetectionResult, HandTracker
-from pen_tracking.pen_tracker_cv import PenTracker
+from pen_tracking.interest_region import InterestRegion
+from pen_tracking.pen_tracker_cv import PenDetectionResult, PenTracker
 from pen_tracking.tracking_result import FrameTrackingResult
 from pen_tracking.video_io import create_video_writer, supports_gui
 
 logger = logging.getLogger(__name__)
 
 _EMPTY_HAND = HandDetectionResult(hand_landmarks=[], handedness=[])
+
+
+@dataclass(frozen=True)
+class _MappedLandmark:
+    x: float
+    y: float
+    z: float = 0.0
+
+
+def _shift_hands(
+    detection: HandDetectionResult,
+    origin_x: int,
+    origin_y: int,
+    crop_width: int,
+    crop_height: int,
+    frame_width: int,
+    frame_height: int,
+) -> HandDetectionResult:
+    """Express crop-relative hand landmarks in the full frame."""
+    hands: list[list[_MappedLandmark]] = []
+    for hand in detection.hand_landmarks:
+        hands.append(
+            [
+                _MappedLandmark(
+                    (landmark.x * crop_width + origin_x) / frame_width,
+                    (landmark.y * crop_height + origin_y) / frame_height,
+                    float(getattr(landmark, "z", 0.0)),
+                )
+                for landmark in hand
+            ]
+        )
+    return HandDetectionResult(hand_landmarks=hands, handedness=list(detection.handedness))
+
+
+def _shift_pen(
+    detection: PenDetectionResult | None,
+    origin_x: int,
+    origin_y: int,
+) -> PenDetectionResult | None:
+    if detection is None:
+        return None
+    return PenDetectionResult(
+        tip=(detection.tip[0] + origin_x, detection.tip[1] + origin_y),
+        grip=(detection.grip[0] + origin_x, detection.grip[1] + origin_y),
+        axis=detection.axis,
+        confidence=detection.confidence,
+        from_hand=detection.from_hand,
+    )
+
+
+def _search_image(frame, region: InterestRegion | None):
+    """Crop to the region when one is set. The origin maps results back."""
+    if region is None:
+        return frame, 0, 0
+    return region.crop(frame)
 
 
 @dataclass
@@ -98,22 +154,37 @@ def process_video(
                     continue
 
                 timestamp_ms = int((frame_index / fps) * 1000)
-                hand_detection = _EMPTY_HAND
+                search, origin_x, origin_y = _search_image(frame, config.region)
+                detected_hands = _EMPTY_HAND
                 if hand_tracker is not None:
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    hand_detection = hand_tracker.detect(rgb_frame, timestamp_ms)
+                    rgb_frame = cv2.cvtColor(search, cv2.COLOR_BGR2RGB)
+                    detected_hands = hand_tracker.detect(rgb_frame, timestamp_ms)
 
                 pen_detection = None
                 if pen_tracker is not None:
-                    if hand_detection.hand_landmarks:
+                    if detected_hands.hand_landmarks:
                         pen_detection = pen_tracker.track(
-                            frame,
-                            hand_detection.hand_landmarks[0],
+                            search,
+                            detected_hands.hand_landmarks[0],
                         )
                     elif config.track_pen_without_hand or not config.track_hand:
-                        pen_detection = pen_tracker.track(frame)
+                        pen_detection = pen_tracker.track(search)
                     else:
                         pen_tracker.reset()
+                    pen_detection = _shift_pen(pen_detection, origin_x, origin_y)
+
+                if config.region is not None:
+                    hand_detection = _shift_hands(
+                        detected_hands,
+                        origin_x,
+                        origin_y,
+                        search.shape[1],
+                        search.shape[0],
+                        frame.shape[1],
+                        frame.shape[0],
+                    )
+                else:
+                    hand_detection = detected_hands
 
                 if config.track_pen:
                     if pen_detection is not None:
@@ -138,6 +209,7 @@ def process_video(
                     tip_color=config.tip_bgr,
                     overlay_thickness=config.overlay_thickness,
                     frame_index=frame_index,
+                    region=config.region,
                 )
 
                 stats.frames_processed += 1

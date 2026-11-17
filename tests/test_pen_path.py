@@ -5,6 +5,7 @@ import numpy as np
 
 from pen_tracking.frame_renderer import PenPath, render_frame
 from pen_tracking.hand_tracker import HandDetectionResult
+from pen_tracking.interest_region import InterestRegion
 from pen_tracking.tracking_result import FrameTrackingResult
 
 
@@ -62,3 +63,21 @@ def test_render_draws_the_trail_and_tip_in_their_own_colors() -> None:
     assert frame[20, 20, 2] > 200
     assert int(frame[40, 20, 2]) > 200
     assert int(frame[40, 20, 1]) < 40
+
+
+def test_render_draws_the_region_outline_and_skips_the_whole_frame() -> None:
+    tracking = FrameTrackingResult(
+        hand=HandDetectionResult(hand_landmarks=[], handedness=[]),
+        pen=None,
+    )
+    region = InterestRegion("rectangle", 10, 70, 80, 95)
+    marked = np.zeros((120, 140, 3), np.uint8)
+    render_frame(marked, tracking, draw_hand=False, draw_pen=False, region=region)
+    assert marked[70, 40, 0] > 150
+    assert marked[70, 40, 1] > 150
+    assert marked[70, 40, 2] < 80
+
+    plain = np.zeros((120, 140, 3), np.uint8)
+    render_frame(plain, tracking, draw_hand=False, draw_pen=False)
+    assert int(plain[70, 40, 0]) == 0
+    assert int(plain[70, 40, 1]) == 0
